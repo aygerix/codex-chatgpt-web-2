@@ -1,3 +1,54 @@
+const CHATGPT_ORIGIN = "https://chatgpt.com";
+const CONVERSATION_HISTORY_RATE_LIMIT_MODAL_CSS = `
+  #modal-conversation-history-rate-limit,
+  [data-testid="modal-conversation-history-rate-limit"] {
+    display: none !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+  }
+`;
+
+const chatGptUiFilterKeys = new WeakMap();
+
+async function applyChatGptUiFilters(contents) {
+  if (!contents || contents.isDestroyed()) return;
+  let url;
+  try {
+    url = new URL(contents.getURL());
+  } catch {
+    return;
+  }
+  if (url.origin !== CHATGPT_ORIGIN) return;
+
+  const previousKey = chatGptUiFilterKeys.get(contents);
+  if (previousKey) {
+    await contents.removeInsertedCSS(previousKey).catch(() => {});
+    chatGptUiFilterKeys.delete(contents);
+  }
+  const key = await contents.insertCSS(CONVERSATION_HISTORY_RATE_LIMIT_MODAL_CSS).catch(() => null);
+  if (key) chatGptUiFilterKeys.set(contents, key);
+}
+
+function installChatGptUiFilters() {
+  let electron;
+  try {
+    electron = require("electron");
+  } catch {
+    return;
+  }
+  const app = electron?.app;
+  if (!app || typeof app.on !== "function") return;
+
+  app.on("web-contents-created", (_event, contents) => {
+    const apply = () => { void applyChatGptUiFilters(contents); };
+    contents.on("did-finish-load", apply);
+    contents.once("destroyed", () => chatGptUiFilterKeys.delete(contents));
+    apply();
+  });
+}
+
+installChatGptUiFilters();
+
 function browserViewVisible(requestedVisible, surfaceActive, boundsReady = true) {
   return requestedVisible === true && surfaceActive === true && boundsReady === true;
 }
