@@ -6,6 +6,12 @@ const CONVERSATION_HISTORY_RATE_LIMIT_MODAL_CSS = `
     visibility: hidden !important;
     pointer-events: none !important;
   }
+
+  body:has(#modal-conversation-history-rate-limit),
+  body:has([data-testid="modal-conversation-history-rate-limit"]) {
+    pointer-events: auto !important;
+    overflow: auto !important;
+  }
 `;
 
 const chatGptUiFilterKeys = new WeakMap();
