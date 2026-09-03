@@ -42,7 +42,6 @@ export function chatGptConversationKey(
   })).digest("hex");
 }
 
-/** Full history remains canonical; a retained epoch receives only the suffix after its last assistant reply. */
 /** A live Codex steering revision reuses the browser conversation and sends only the new instruction. */
 export function retainedConversationSteeringRequest(
   parsed: CodexParsedRequest,
@@ -58,6 +57,7 @@ export function retainedConversationSteeringRequest(
   };
 }
 
+/** Full history remains canonical; a retained epoch receives only the suffix after its last assistant reply. */
 export function retainedConversationResumeRequest(
   parsed: CodexParsedRequest,
 ): CodexParsedRequest | undefined {

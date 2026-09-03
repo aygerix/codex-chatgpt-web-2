@@ -800,7 +800,7 @@ class BrowserHost {
 
   async refreshChatGptHomeDocument() {
     // A navigation from the idle host already creates a fresh ChatGPT document. Reload only an
-    // existing Temporary Chat document; doing both back-to-back races the helper against a second
+    // existing regular ChatGPT document; doing both back-to-back races the helper against a second
     // SPA bootstrap and is why first setup/verification attempts timed out while the retry worked.
     if (isRegularChatUrl(this.view.webContents.getURL())) {
       await this.hardRefreshHome();
@@ -1818,7 +1818,7 @@ class BrowserHost {
           url: actualUrl.href,
           composer: Boolean(composer),
           regular: actualUrl.origin === expectedUrl.origin
-            && actualUrl.searchParams.get("temporary-chat") !== "true",
+            && !actualUrl.searchParams.has("temporary-chat"),
           readyState: document.readyState,
         };
       };
