@@ -20,6 +20,21 @@ text = text.replace('.temporary', '.regular')
 text = text.replace('Temporary Chat', 'regular ChatGPT')
 # Initial staging already renamed the helper predicate import/calls.
 text = text.replace('isTemporaryChatUrl', 'isRegularChatUrl')
+# Once the primary surface is already authenticated at the regular root, login should not force
+# a redundant navigation merely to "re-prove" the same document.
+test_name = 'test("a successful primary login redirect is re-proved on regular ChatGPT before login completes"'
+start = text.find(test_name)
+if start < 0:
+    raise SystemExit("regular primary-login fixture not found")
+end = text.find('\n});', start)
+if end < 0:
+    raise SystemExit("regular primary-login fixture end not found")
+block = text[start:end]
+old_assertion = 'assert.deepEqual(loadedUrls, ["https://chatgpt.com/"]);'
+if block.count(old_assertion) != 1:
+    raise SystemExit(f"regular primary-login fixture expected one navigation assertion, found {block.count(old_assertion)}")
+block = block.replace(old_assertion, 'assert.deepEqual(loadedUrls, []);', 1)
+text = text[:start] + block + text[end:]
 p.write_text(text)
 
 # Any other launcher fixtures that describe session evidence should use regular-only semantics.
