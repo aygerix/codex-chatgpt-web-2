@@ -18,13 +18,13 @@ const target = "codex_core::session::handlers";
 const threadId = "01thread";
 const turnId = "01turn";
 
-function submissionRow(id: number, text: string, mode = `Steer { expected_turn_id: \\"${turnId}\\" }`) {
+function submissionRow(id: number, text: string, mode = `Steer { expected_turn_id: "${turnId}" }`) {
   const encoded = JSON.stringify(text).slice(1, -1);
   return {
     id,
     target,
     thread_id: threadId,
-    message: `Submission { id: \\"sub\\", op: TurnInput { request: TurnInputRequest { input: UserInput([Text { text: \\"${encoded}\\", text_elements: [] }]) }, mode: ${mode}, reply: Sender { .. } } }`,
+    message: `Submission { id: "sub", op: TurnInput { request: TurnInputRequest { input: UserInput([Text { text: "${encoded}", text_elements: [] }]) }, mode: ${mode}, reply: Sender { .. } } }`,
   };
 }
 
