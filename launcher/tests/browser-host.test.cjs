@@ -181,7 +181,7 @@ test("the idle home browser performs one bounded reload for a Cloudflare challen
     view: {
       webContents: {
         id: 42,
-        getURL: () => "https://chatgpt.com/",
+        getURL: () => "https://chatgpt.com/?temporary-chat=true",
         isDestroyed: () => false,
         loadURL: async (url) => calls.push(["loadURL", url]),
       },
@@ -660,7 +660,7 @@ test("guest and incomplete server sessions do not prove launcher authentication"
   assert.equal(result.status, "signed-out");
 });
 
-test("launcher authentication requires the regular ChatGPT composer and complete server session", async () => {
+test("launcher authentication requires the Temporary Chat composer and complete server session", async () => {
   const fixture = {
     state: { authenticated: false },
     activeTraceId: null,
@@ -965,7 +965,7 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
   assert.deepEqual(calls[0], ["manualOperation", "ChatGPT logout"]);
   assert.deepEqual(calls[1], ["closeAuthView", authView, true, false]);
   assert.deepEqual(calls[2], ["clearStorageData"]);
-  assert.deepEqual(calls[4], ["loadURL", "https://chatgpt.com/"]);
+  assert.deepEqual(calls[4], ["loadURL", "https://chatgpt.com/?temporary-chat=true"]);
   assert.ok(calls.some(([name]) => name === "activateHomeSurface"));
   assert.ok(calls.some(([name]) => name === "show"));
 });
@@ -989,7 +989,7 @@ test("launcher shutdown persists ChatGPT DOM storage and cookies before browser 
   assert.deepEqual(calls, ["storage", "cookies"]);
 });
 
-test("OAuth completion is re-proved on the primary regular ChatGPT surface before login succeeds", async () => {
+test("OAuth completion is re-proved on the primary Temporary Chat surface before login succeeds", async () => {
   let primaryReady = false;
   const completedAuthView = {
     webContents: {
@@ -1011,20 +1011,20 @@ test("OAuth completion is re-proved on the primary regular ChatGPT surface befor
     view: {
       webContents: {
         getURL: () => primaryReady
-          ? "https://chatgpt.com/"
+          ? "https://chatgpt.com/?temporary-chat=true"
           : "https://chatgpt.com/auth/login",
         isDestroyed: () => false,
         executeJavaScript: async () => ({
           composer: primaryReady,
-          regular: primaryReady,
+          temporary: primaryReady,
           sessionAuthenticated: primaryReady,
           readyState: "complete",
           url: primaryReady
-            ? "https://chatgpt.com/"
+            ? "https://chatgpt.com/?temporary-chat=true"
             : "https://chatgpt.com/auth/login",
         }),
         loadURL: async (url) => {
-          assert.equal(url, "https://chatgpt.com/");
+          assert.equal(url, "https://chatgpt.com/?temporary-chat=true");
           primaryReady = true;
         },
       },
@@ -1042,10 +1042,10 @@ test("OAuth completion is re-proved on the primary regular ChatGPT surface befor
   const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
   assert.equal(result.authenticated, true);
   assert.equal(fixture.authView, null);
-  assert.equal(result.url, "https://chatgpt.com/");
+  assert.equal(result.url, "https://chatgpt.com/?temporary-chat=true");
 });
 
-test("a successful primary login redirect is re-proved on regular ChatGPT before login completes", async () => {
+test("a successful primary login redirect is re-proved on Temporary Chat before login completes", async () => {
   let currentUrl = "https://chatgpt.com/";
   const loadedUrls = [];
   const fixture = {
@@ -1060,7 +1060,7 @@ test("a successful primary login redirect is re-proved on regular ChatGPT before
         isDestroyed: () => false,
         executeJavaScript: async () => ({
           composer: true,
-          regular: currentUrl === "https://chatgpt.com/",
+          temporary: currentUrl === "https://chatgpt.com/?temporary-chat=true",
           sessionAuthenticated: true,
           readyState: "complete",
           url: currentUrl,
@@ -1077,9 +1077,9 @@ test("a successful primary login redirect is re-proved on regular ChatGPT before
 
   const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
 
-  assert.deepEqual(loadedUrls, []);
+  assert.deepEqual(loadedUrls, ["https://chatgpt.com/?temporary-chat=true"]);
   assert.equal(result.authenticated, true);
-  assert.equal(result.url, "https://chatgpt.com/");
+  assert.equal(result.url, "https://chatgpt.com/?temporary-chat=true");
 });
 
 test("an authenticated primary surface closes a stale embedded auth popup", async () => {
@@ -1659,7 +1659,7 @@ test("launcher session refresh resolves persisted authentication before setup ac
   assert.deepEqual(calls, [
     ["operation", "session refresh"],
     ["state", { status: "loading", message: "Checking saved ChatGPT session" }],
-    ["load", "https://chatgpt.com/"],
+    ["load", "https://chatgpt.com/?temporary-chat=true"],
     ["probe"],
     ["state", { status: "ready", message: "ChatGPT is ready" }],
   ]);
@@ -1679,7 +1679,7 @@ test("concurrent launcher session refresh requests share one browser operation",
       return await action();
     },
     view: { webContents: {
-      getURL: () => "https://chatgpt.com/",
+      getURL: () => "https://chatgpt.com/?temporary-chat=true",
       loadURL: async () => {},
     } },
   };
