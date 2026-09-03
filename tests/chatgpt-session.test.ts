@@ -4,14 +4,12 @@ import {
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_MENU_SELECTOR,
   CHATGPT_EFFORT_SLIDER_SELECTOR,
-  CHATGPT_NEW_CHAT_URL,
-  CHATGPT_REGULAR_CHAT_URL,
+  CHATGPT_TEMPORARY_CHAT_URL,
   detectChatGptAccountCapabilities,
 } from "../src/chatgpt-session";
 
-test("regular history-backed chats are the only surface", () => {
-  expect(CHATGPT_NEW_CHAT_URL).toBe(CHATGPT_REGULAR_CHAT_URL);
-  expect(CHATGPT_NEW_CHAT_URL).toBe("https://chatgpt.com/");
+test("isolated Temporary Chat is the only turn surface", () => {
+  expect(CHATGPT_TEMPORARY_CHAT_URL).toBe("https://chatgpt.com/?temporary-chat=true");
 });
 
 test("login keeps the established turn composer contract", () => {

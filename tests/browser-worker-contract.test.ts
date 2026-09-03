@@ -80,6 +80,13 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   );
   expect(runBrowserTurn).not.toContain("userTurns.nth(initialUserTurnCount).waitFor");
   expect(workerSource).not.toMatch(/\bclipboard\b|pbcopy|pbpaste/i);
+  const prepareTemporaryChatSurface = workerSource.slice(
+    workerSource.indexOf("  private async prepareTemporaryChatSurface("),
+    workerSource.indexOf("  private async waitForTurnDomMutation("),
+  );
+  expect(prepareTemporaryChatSurface).toContain("await assertTemporaryChatPage(page)");
+  expect(prepareTemporaryChatSurface).toContain("await ensureChatGptPersonalizedConnectorAccess(page, captureDiagnostic)");
+  expect(prepareTemporaryChatSurface).toContain('await captureDiagnostic?.("personalization-verified")');
 });
 
 test("conversation turn identity survives ChatGPT DOM virtualization", () => {

@@ -16,7 +16,7 @@ const {
   BrowserHost,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
-  isRegularChatUrl,
+  isTemporaryChatUrl,
   loadCommittedBrowserSurface,
   navigationErrorForLog,
   navigationOriginForLog,
@@ -206,7 +206,7 @@ test("the idle home browser performs one bounded reload for a Cloudflare challen
   await fixture.cloudflareChallengeRecovery;
 
   assert.deepEqual(calls.filter(([name]) => name === "loadURL"), [
-    ["loadURL", "https://chatgpt.com/"],
+    ["loadURL", "https://chatgpt.com/?temporary-chat=true"],
   ]);
   assert.equal(fixture.cloudflareChallengeRecoveryArmed, false);
 
@@ -283,11 +283,12 @@ test("descriptor-owned home surface stays attached offscreen while another launc
   ]);
 });
 
-test("smoke preserves an already-hydrated regular ChatGPT page", () => {
-  assert.equal(isRegularChatUrl("https://chatgpt.com/"), true);
-  assert.equal(isRegularChatUrl("https://chatgpt.com/?temporary-chat=false"), false);
-  assert.equal(isRegularChatUrl("https://chatgpt.com/c/abc?temporary-chat=true"), false);
-  assert.equal(isRegularChatUrl("not a url"), false);
+test("smoke preserves only an already-hydrated Temporary Chat page", () => {
+  assert.equal(isTemporaryChatUrl("https://chatgpt.com/?temporary-chat=true"), true);
+  assert.equal(isTemporaryChatUrl("https://chatgpt.com/"), false);
+  assert.equal(isTemporaryChatUrl("https://chatgpt.com/?temporary-chat=false"), false);
+  assert.equal(isTemporaryChatUrl("https://chatgpt.com/c/abc?temporary-chat=true"), false);
+  assert.equal(isTemporaryChatUrl("not a url"), false);
 });
 
 test("session inspection delegates navigation and capability detection to the shared browser helper", async () => {
@@ -305,8 +306,8 @@ test("session inspection delegates navigation and capability detection to the sh
         type: "result",
         value: {
           authenticated: true,
-          regular: true,
-          url: "https://chatgpt.com/",
+          temporary: true,
+          url: "https://chatgpt.com/?temporary-chat=true",
           solAvailable: true,
           proAvailable: true,
         },
@@ -318,8 +319,8 @@ test("session inspection delegates navigation and capability detection to the sh
 
   assert.deepEqual(inspected, {
     authenticated: true,
-    regular: true,
-    url: "https://chatgpt.com/",
+    temporary: true,
+    url: "https://chatgpt.com/?temporary-chat=true",
     solAvailable: true,
     proAvailable: true,
   });
@@ -340,7 +341,7 @@ test("session inspection fails closed on incomplete shared-helper capability evi
     refreshChatGptHomeDocument: async () => {},
     runBrowserHelperOperation: async () => ({
       type: "result",
-      value: { authenticated: true, regular: true, url: "https://chatgpt.com/" },
+      value: { authenticated: true, temporary: true, url: "https://chatgpt.com/?temporary-chat=true" },
     }),
   });
   await assert.rejects(
@@ -643,7 +644,7 @@ test("guest and incomplete server sessions do not prove launcher authentication"
         getURL: () => "https://chatgpt.com/",
         executeJavaScript: async () => ({
           composer: true,
-          regular: true,
+          temporary: true,
           sessionAuthenticated: false,
           readyState: "complete",
         }),
@@ -670,7 +671,7 @@ test("launcher authentication requires the regular ChatGPT composer and complete
         getURL: () => "https://chatgpt.com/",
         executeJavaScript: async () => ({
           composer: true,
-          regular: true,
+          temporary: true,
           sessionAuthenticated: true,
           readyState: "complete",
         }),
@@ -995,7 +996,7 @@ test("OAuth completion is re-proved on the primary regular ChatGPT surface befor
       isDestroyed: () => false,
       executeJavaScript: async () => ({
         composer: true,
-        regular: false,
+        temporary: false,
         sessionAuthenticated: true,
         readyState: "complete",
       }),
@@ -1087,7 +1088,7 @@ test("an authenticated primary surface closes a stale embedded auth popup", asyn
       isDestroyed: () => false,
       executeJavaScript: async () => ({
         composer: false,
-        regular: false,
+        temporary: false,
         sessionAuthenticated: false,
         readyState: "complete",
       }),
@@ -1106,7 +1107,7 @@ test("an authenticated primary surface closes a stale embedded auth popup", asyn
         isDestroyed: () => false,
         executeJavaScript: async () => ({
           composer: true,
-          regular: true,
+          temporary: true,
           sessionAuthenticated: true,
           readyState: "complete",
           url: "https://chatgpt.com/",

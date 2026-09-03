@@ -2009,7 +2009,7 @@ export class ChatGptBrowserWorker {
 
   inspectSession(detectCapabilities: boolean): Promise<{
     authenticated: true;
-    regular: true;
+    temporary: true;
     url: string;
     solAvailable?: boolean;
     proAvailable?: boolean;
@@ -2402,8 +2402,10 @@ export class ChatGptBrowserWorker {
     await throwIfChatGptSessionFailureAlert(page);
     await assertAuthenticatedChatGptPage(page);
     await assertTemporaryChatPage(page);
+    await ensureChatGptPersonalizedConnectorAccess(page, captureDiagnostic);
+    await captureDiagnostic?.("personalization-verified");
     await captureDiagnostic?.("session-verified");
-    return composer;
+    return await this.activeComposer(page);
   }
 
   private async waitForTurnDomMutation(page: Page, timeoutMs = 50): Promise<void> {
@@ -3383,7 +3385,7 @@ export class ChatGptBrowserWorker {
 
   private async inspectSessionExclusive(detectCapabilities: boolean): Promise<{
     authenticated: true;
-    regular: true;
+    temporary: true;
     url: string;
     solAvailable?: boolean;
     proAvailable?: boolean;
@@ -3391,9 +3393,9 @@ export class ChatGptBrowserWorker {
     const page = await this.ensurePage();
     await this.prepareTemporaryChatSurface(page);
     const url = page.url();
-    if (!detectCapabilities) return { authenticated: true, regular: true, url };
+    if (!detectCapabilities) return { authenticated: true, temporary: true, url };
     const capabilities = await detectChatGptAccountCapabilities(page);
-    return { authenticated: true, regular: true, url, ...capabilities };
+    return { authenticated: true, temporary: true, url, ...capabilities };
   }
 
   private async smokeTestExclusive(abortSignal?: AbortSignal): Promise<{ effort: string; response: string }> {
