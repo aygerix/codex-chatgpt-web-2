@@ -85,8 +85,14 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
     workerSource.indexOf("  private async waitForTurnDomMutation("),
   );
   expect(prepareTemporaryChatSurface).toContain("await assertTemporaryChatPage(page)");
-  expect(prepareTemporaryChatSurface).toContain("await ensureChatGptPersonalizedConnectorAccess(page, captureDiagnostic)");
-  expect(prepareTemporaryChatSurface).toContain('await captureDiagnostic?.("personalization-verified")');
+  expect(prepareTemporaryChatSurface).not.toContain("ensureChatGptPersonalizedConnectorAccess(");
+  const selectConnector = workerSource.slice(
+    workerSource.indexOf("  private async selectConnector("),
+    workerSource.indexOf("  private async attachPrompt("),
+  );
+  expect(selectConnector).toContain("await ensureChatGptPersonalizedConnectorAccess(");
+  expect(selectConnector).toContain("async (personalizationSignal) =>");
+  expect(selectConnector).toContain("await appResult.waitFor");
   expect(workerSource).toContain("__CODEX_WEB_GPT_STEER_REVISION__");
   expect(workerSource).toContain("waitForSteeredAssistantTurn");
   expect(workerSource).toContain("completionSteerRevision > handledSteerRevision");
