@@ -2402,8 +2402,11 @@ export class ChatGptBrowserWorker {
     await throwIfChatGptSessionFailureAlert(page);
     await assertAuthenticatedChatGptPage(page);
     await assertTemporaryChatPage(page);
-    await ensureChatGptPersonalizedConnectorAccess(page, captureDiagnostic);
-    await captureDiagnostic?.("personalization-verified");
+    // Surface preparation proves only authentication + Temporary Chat. Personalization is
+    // connector-specific and ChatGPT does not expose its control on every fresh Temporary Chat.
+    // Tool-capable turns prove/enable it inside selectConnector(), where the configured connector
+    // itself is authoritative evidence when the UI control is absent. Browser-only turns must not
+    // fail merely because that optional control was not rendered.
     await captureDiagnostic?.("session-verified");
     return await this.activeComposer(page);
   }
