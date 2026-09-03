@@ -60,11 +60,18 @@ jobs:
           # Session refresh always targets the exact Temporary Chat surface.
           once('''    ["load", "https://chatgpt.com/"],''',
                f'''    ["load", "{temp}"],''')
-          # Concurrent refresh should start already on the target surface so its probe is entered synchronously.
-          once('''      getURL: () => "https://chatgpt.com/",\n      loadURL: async () => {},''',
-               f'''      getURL: () => "{temp}",\n      loadURL: async () => {{}},''')
 
-          # Cosmetic title now matches the actual auth invariant.
+          # Concurrent refresh starts on the exact target so its probe is entered synchronously.
+          title = 'test("concurrent launcher session refresh requests share one browser operation", async () => {'
+          start = text.index(title)
+          end = text.index('\n});', start) + len('\n});')
+          block = text[start:end]
+          old = '''      getURL: () => "https://chatgpt.com/",\n      loadURL: async () => {},'''
+          if block.count(old) != 1:
+              raise SystemExit(f'concurrent refresh fixture did not expose one expected URL block: {block.count(old)}')
+          block = block.replace(old, f'''      getURL: () => "{temp}",\n      loadURL: async () => {{}},''', 1)
+          text = text[:start] + block + text[end:]
+
           text = text.replace(
               'test("launcher authentication requires the regular ChatGPT composer and complete server session",',
               'test("launcher authentication requires the Temporary Chat composer and complete server session",',
