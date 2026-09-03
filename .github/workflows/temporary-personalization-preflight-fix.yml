@@ -41,7 +41,7 @@ jobs:
           once(
               "tests/browser-worker-contract.test.ts",
               '''  expect(prepareTemporaryChatSurface).toContain("await assertTemporaryChatPage(page)");\n  expect(prepareTemporaryChatSurface).toContain("await ensureChatGptPersonalizedConnectorAccess(page, captureDiagnostic)");\n  expect(prepareTemporaryChatSurface).toContain('await captureDiagnostic?.("personalization-verified")');''',
-              '''  expect(prepareTemporaryChatSurface).toContain("await assertTemporaryChatPage(page)");\n  expect(prepareTemporaryChatSurface).not.toContain("ensureChatGptPersonalizedConnectorAccess(");\n  const selectConnector = workerSource.slice(\n    workerSource.indexOf("  private async selectConnector("),\n    workerSource.indexOf("  private async attachPrompt("),\n  );\n  expect(selectConnector).toContain("await ensureChatGptPersonalizedConnectorAccess(");\n  expect(selectConnector).toContain("proveConfiguredConnectorAccess");''',
+              '''  expect(prepareTemporaryChatSurface).toContain("await assertTemporaryChatPage(page)");\n  expect(prepareTemporaryChatSurface).not.toContain("ensureChatGptPersonalizedConnectorAccess(");\n  const selectConnector = workerSource.slice(\n    workerSource.indexOf("  private async selectConnector("),\n    workerSource.indexOf("  private async attachPrompt("),\n  );\n  expect(selectConnector).toContain("await ensureChatGptPersonalizedConnectorAccess(");\n  expect(selectConnector).toContain("async (personalizationSignal) =>");\n  expect(selectConnector).toContain("await appResult.waitFor");''',
           )
           PY
           git diff --check
