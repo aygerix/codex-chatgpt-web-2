@@ -25,6 +25,7 @@ jobs:
           python3 scripts/fix-live-steering-handoff-ownership.py
           python3 scripts/fix-live-steering-browser-only-reuse.py
           python3 scripts/fix-regular-only-launcher-tests.py
+          python3 scripts/fix-regular-turn-retention.py
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
@@ -47,7 +48,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/workflows/apply-live-steering-fix.yml scripts/apply-live-steering-fix.py scripts/fix-live-steering-patch-output.py scripts/fix-live-steering-handoff-ownership.py scripts/fix-live-steering-browser-only-reuse.py scripts/fix-regular-only-launcher-tests.py
+          git rm .github/workflows/apply-live-steering-fix.yml scripts/apply-live-steering-fix.py scripts/fix-live-steering-patch-output.py scripts/fix-live-steering-handoff-ownership.py scripts/fix-live-steering-browser-only-reuse.py scripts/fix-regular-only-launcher-tests.py scripts/fix-regular-turn-retention.py
           git add -A
           git commit -m "fix: forward Codex steering into live web conversations"
           git push origin HEAD:fix/live-codex-steering-regular-only
