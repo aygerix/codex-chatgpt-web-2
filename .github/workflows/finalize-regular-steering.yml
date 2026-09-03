@@ -1,0 +1,47 @@
+name: Finalize regular-only steering
+
+on:
+  push:
+    branches:
+      - fix/live-codex-steering-regular-only
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-commit:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/live-codex-steering-regular-only
+          fetch-depth: 0
+      - name: Apply final strict regular-only patch
+        run: python3 scripts/finalize-regular-steering.py
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
+        working-directory: launcher
+      - name: Verify source and runtime contracts
+        shell: bash
+        run: |
+          bun run check-version
+          bun run typecheck
+          bun run test
+          bun run launcher:typecheck
+          bun run launcher:test
+          bun run launcher:build
+          bun run build
+          bun run smoke
+      - name: Commit verified final patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/finalize-regular-steering.yml scripts/finalize-regular-steering.py
+          git add -A
+          git commit -m "fix: enforce regular-only ChatGPT steering"
+          git push origin HEAD:fix/live-codex-steering-regular-only
