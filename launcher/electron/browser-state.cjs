@@ -6,12 +6,132 @@ const CONVERSATION_HISTORY_RATE_LIMIT_MODAL_CSS = `
     visibility: hidden !important;
     pointer-events: none !important;
   }
+`;
 
-  body:has(#modal-conversation-history-rate-limit),
-  body:has([data-testid="modal-conversation-history-rate-limit"]) {
-    pointer-events: auto !important;
-    overflow: auto !important;
+const CONVERSATION_HISTORY_RATE_LIMIT_RECOVERY_SCRIPT = String.raw`
+(() => {
+  const stateKey = "__CODEX_WEB_HISTORY_RATE_LIMIT_RECOVERY_V1__";
+  const existing = globalThis[stateKey];
+  if (existing && typeof existing.recover === "function") {
+    existing.recover();
+    return true;
   }
+
+  const modalSelector = [
+    "#modal-conversation-history-rate-limit",
+    '[data-testid="modal-conversation-history-rate-limit"]',
+  ].join(", ");
+  const attemptedDismiss = new WeakSet();
+
+  const rendered = (element) => {
+    if (!(element instanceof HTMLElement) || !element.isConnected) return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none"
+      && style.visibility !== "hidden"
+      && style.opacity !== "0";
+  };
+
+  const topLevelPortal = (element) => {
+    let current = element;
+    while (current.parentElement && current.parentElement !== document.body) {
+      current = current.parentElement;
+    }
+    return current;
+  };
+
+  const anotherDialogIsOpen = (historyDialog) => (
+    [...document.querySelectorAll('[role="dialog"]')].some(candidate => (
+      candidate !== historyDialog
+      && !historyDialog.contains(candidate)
+      && rendered(candidate)
+    ))
+  );
+
+  const restoreBackgroundInteraction = (historyDialog, hiddenPortal) => {
+    if (anotherDialogIsOpen(historyDialog)) return;
+
+    const body = document.body;
+    const html = document.documentElement;
+    if (body) body.removeAttribute("data-scroll-locked");
+
+    for (const element of [html, body]) {
+      if (!element) continue;
+      const overflow = element.style.getPropertyValue("overflow").trim().toLowerCase();
+      if (overflow === "hidden" || overflow === "clip") {
+        element.style.removeProperty("overflow");
+      }
+      if (element.style.getPropertyValue("pointer-events").trim().toLowerCase() === "none") {
+        element.style.removeProperty("pointer-events");
+      }
+      if (element.style.getPropertyValue("touch-action").trim().toLowerCase() === "none") {
+        element.style.removeProperty("touch-action");
+      }
+    }
+
+    if (!body) return;
+    for (const child of [...body.children]) {
+      if (child === hiddenPortal) continue;
+      if (child.hasAttribute("inert")) child.removeAttribute("inert");
+    }
+  };
+
+  const recover = () => {
+    const modal = document.querySelector(modalSelector);
+    if (!(modal instanceof HTMLElement)) return false;
+
+    const historyDialog = modal.closest('[role="dialog"]') || modal;
+    if (!attemptedDismiss.has(historyDialog)) {
+      attemptedDismiss.add(historyDialog);
+      const close = historyDialog.querySelector([
+        '[data-testid="modal-close-button"]',
+        'button[data-testid="close-button"]',
+        'button[aria-label="Close"]',
+        'button[aria-label="Dismiss"]',
+      ].join(", "));
+      if (close instanceof HTMLElement) {
+        close.click();
+      } else {
+        const escape = () => new KeyboardEvent("keydown", {
+          key: "Escape",
+          code: "Escape",
+          bubbles: true,
+          cancelable: true,
+        });
+        historyDialog.dispatchEvent(escape());
+        document.dispatchEvent(escape());
+      }
+      queueMicrotask(recover);
+      return true;
+    }
+
+    // Some history-limit dialogs are intentionally non-dismissible. In that case hide only the
+    // portal that owns this exact dialog, then undo the modal library's interaction locks. Do not
+    // unlock the background while any other visible dialog is open.
+    const portal = topLevelPortal(historyDialog);
+    if (portal instanceof HTMLElement) {
+      portal.style.setProperty("display", "none", "important");
+      portal.style.setProperty("visibility", "hidden", "important");
+      portal.style.setProperty("pointer-events", "none", "important");
+    } else {
+      historyDialog.style.setProperty("display", "none", "important");
+      historyDialog.style.setProperty("visibility", "hidden", "important");
+      historyDialog.style.setProperty("pointer-events", "none", "important");
+    }
+    restoreBackgroundInteraction(historyDialog, portal);
+    return true;
+  };
+
+  const observer = new MutationObserver(recover);
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["class", "data-scroll-locked", "inert", "style"],
+  });
+  globalThis[stateKey] = { observer, recover };
+  recover();
+  return true;
+})()
 `;
 
 const chatGptUiFilterKeys = new WeakMap();
@@ -33,6 +153,9 @@ async function applyChatGptUiFilters(contents) {
   }
   const key = await contents.insertCSS(CONVERSATION_HISTORY_RATE_LIMIT_MODAL_CSS).catch(() => null);
   if (key) chatGptUiFilterKeys.set(contents, key);
+  if (typeof contents.executeJavaScript === "function") {
+    await contents.executeJavaScript(CONVERSATION_HISTORY_RATE_LIMIT_RECOVERY_SCRIPT, true).catch(() => {});
+  }
 }
 
 function installChatGptUiFilters() {
@@ -121,6 +244,8 @@ function navigateBrowser(contents, action) {
 }
 
 module.exports = {
+  CONVERSATION_HISTORY_RATE_LIMIT_MODAL_CSS,
+  CONVERSATION_HISTORY_RATE_LIMIT_RECOVERY_SCRIPT,
   browserViewVisible,
   constrainBrowserBounds,
   navigateBrowser,
