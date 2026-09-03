@@ -1,0 +1,481 @@
+name: Apply live steering fix
+
+on:
+  push:
+    branches: [fix/live-codex-steering-regular-only]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/live-codex-steering-regular-only
+          fetch-depth: 0
+      - name: Apply source patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def read(path):
+              return Path(path).read_text()
+
+          def write(path, text):
+              Path(path).write_text(text)
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              return text.replace(old, new, 1)
+
+          def sub_once(text, pattern, repl, label, flags=0):
+              out, count = re.subn(pattern, repl, text, count=1, flags=flags)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one regex match, found {count}")
+              return out
+
+          # ------------------------------------------------------------------
+          # Regular chats only. Keep legacy export/function names only where the
+          # large worker imports them; behavior no longer permits Temporary Chat.
+          # ------------------------------------------------------------------
+          path = "src/chatgpt-session.ts"
+          text = read(path)
+          text = sub_once(
+              text,
+              r'export type ChatGptChatSurface = "regular" \| "temporary";\n\nexport const CHATGPT_REGULAR_CHAT_URL = "https://chatgpt\.com/";[\s\S]*?export const CHATGPT_TEMPORARY_CHAT_URL = CHATGPT_NEW_CHAT_URL;\n',
+              '''export const CHATGPT_REGULAR_CHAT_URL = "https://chatgpt.com/";\nexport const CHATGPT_NEW_CHAT_URL = CHATGPT_REGULAR_CHAT_URL;\n\n/** Legacy import name retained for the browser worker; it now always means regular ChatGPT. */\nexport const CHATGPT_TEMPORARY_CHAT_URL = CHATGPT_NEW_CHAT_URL;\n''',
+              "chatgpt-session regular-only constants",
+          )
+          text = sub_once(
+              text,
+              r'/\*\*[\s\S]*?Backward-compatible assertion used by the browser worker\.[\s\S]*?export async function assertTemporaryChatPage\(page: Page\): Promise<void> \{[\s\S]*?\n\}\n\nexport async function detectChatGptAccountCapabilities',
+              '''/** Legacy assertion name retained for the worker; only regular/history-backed chats are valid. */\nexport async function assertTemporaryChatPage(page: Page): Promise<void> {\n  const url = new URL(page.url());\n  const expected = new URL(CHATGPT_NEW_CHAT_URL);\n  if (url.origin !== expected.origin || url.searchParams.get("temporary-chat") === "true") {\n    throw new Error(`ChatGPT left the regular chat surface (${page.url()})`);\n  }\n}\n\nexport async function detectChatGptAccountCapabilities''',
+              "chatgpt-session regular-only assertion",
+          )
+          write(path, text)
+
+          path = "tests/chatgpt-session.test.ts"
+          text = read(path)
+          text = text.replace("  CHATGPT_CHAT_SURFACE,\n", "")
+          text = text.replace("  resolveChatGptChatSurface,\n", "")
+          text = sub_once(
+              text,
+              r'test\("regular history-backed chats are the default surface", \(\) => \{[\s\S]*?\n\}\);\n\ntest\("temporary chats remain an explicit opt-in surface", \(\) => \{[\s\S]*?\n\}\);\n',
+              '''test("regular history-backed chats are the only surface", () => {\n  expect(CHATGPT_NEW_CHAT_URL).toBe(CHATGPT_REGULAR_CHAT_URL);\n  expect(CHATGPT_NEW_CHAT_URL).toBe("https://chatgpt.com/");\n});\n''',
+              "chatgpt-session tests regular-only",
+          )
+          write(path, text)
+
+          # Launcher home/session surface: regular ChatGPT only.
+          path = "launcher/electron/browser-host.cjs"
+          text = read(path)
+          text = text.replace("TEMPORARY_CHAT_URL", "CHATGPT_HOME_URL")
+          text = text.replace("isTemporaryChatUrl", "isRegularChatUrl")
+          text = replace_once(
+              text,
+              'const CHATGPT_HOME_URL = "https://chatgpt.com/?temporary-chat=true";',
+              'const CHATGPT_HOME_URL = "https://chatgpt.com/";',
+              "browser-host regular URL",
+          )
+          text = sub_once(
+              text,
+              r'function isRegularChatUrl\(value\) \{[\s\S]*?\n\}',
+              '''function isRegularChatUrl(value) {\n  let parsed;\n  try {\n    parsed = new URL(value);\n  } catch {\n    return false;\n  }\n  return parsed.origin === CHATGPT_ORIGIN\n    && parsed.searchParams.get("temporary-chat") !== "true";\n}''',
+              "browser-host regular URL predicate",
+          )
+          text = replace_once(
+              text,
+              '''          temporary: actualUrl.origin === expectedUrl.origin\n            && actualUrl.pathname === expectedUrl.pathname\n            && actualUrl.searchParams.get("temporary-chat") === "true",''',
+              '''          regular: actualUrl.origin === expectedUrl.origin\n            && actualUrl.searchParams.get("temporary-chat") !== "true",''',
+              "browser-host auth regular surface",
+          )
+          text = text.replace("temporary: false", "regular: false")
+          text = text.replace("result.temporary", "result.regular")
+          text = text.replace("authResult.temporary", "authResult.regular")
+          text = text.replace("inspected.temporary", "inspected.regular")
+          text = text.replace("inspected.regular !== true", "inspected.regular !== true")
+          write(path, text)
+
+          path = "launcher/tests/browser-host.test.cjs"
+          text = read(path).replace("isTemporaryChatUrl", "isRegularChatUrl")
+          write(path, text)
+
+          path = "src/launcher-browser-host.ts"
+          text = read(path)
+          text = replace_once(
+              text,
+              'if (body.authenticated !== true || body.temporary !== true || typeof body.url !== "string") {',
+              'if (body.authenticated !== true || body.regular !== true || typeof body.url !== "string") {',
+              "launcher client regular inspection",
+          )
+          write(path, text)
+
+          path = "src/adapters/chatgpt-web/browser-worker.ts"
+          text = read(path)
+          text = text.replace("    temporary: true;\n", "    regular: true;\n")
+          text = text.replace("{ authenticated: true, temporary: true, url }", "{ authenticated: true, regular: true, url }")
+          text = text.replace("{ authenticated: true, temporary: true, url, ...capabilities }", "{ authenticated: true, regular: true, url, ...capabilities }")
+          write(path, text)
+
+          # ------------------------------------------------------------------
+          # Steering prompt: only the newest Codex user instruction is sent when
+          # reusing the live browser conversation after a steering handoff.
+          # ------------------------------------------------------------------
+          path = "src/adapters/chatgpt-web/conversation-key.ts"
+          text = read(path)
+          marker = '''export function retainedConversationResumeRequest(\n  parsed: CodexParsedRequest,\n): CodexParsedRequest | undefined {'''
+          if marker not in text:
+              raise SystemExit("conversation-key resume marker missing")
+          addition = '''/** A live Codex steering revision reuses the browser conversation and sends only the new instruction. */\nexport function retainedConversationSteeringRequest(\n  parsed: CodexParsedRequest,\n): CodexParsedRequest | undefined {\n  const latestUser = parsed.context.messages.findLast(message => message.role === "user");\n  if (!latestUser) return undefined;\n  return {\n    ...parsed,\n    context: {\n      ...parsed.context,\n      messages: [latestUser],\n    },\n  };\n}\n\n'''
+          text = text.replace(marker, addition + marker, 1)
+          write(path, text)
+
+          # ------------------------------------------------------------------
+          # Launcher control channel: reserve the active tab for steering while
+          # the old helper aborts, then mark that exact conversation reusable.
+          # ------------------------------------------------------------------
+          Path("launcher/electron/steering-handoff.cjs").write_text(r'''const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
+
+function ownedTurnTab(host, traceId, helperPid, conversationKey) {
+  if (!(host?.turnTabs instanceof Map)) throw new Error("browser turn registry is unavailable");
+  const tab = [...host.turnTabs.values()].find(candidate => candidate.traceId === traceId);
+  if (!tab) throw new Error(`Browser turn ownership mismatch: no browser tab owns ${traceId}`);
+  if (tab.helperPid !== helperPid) {
+    throw new Error(`Browser helper ownership mismatch: expected ${tab.helperPid}, received ${helperPid}`);
+  }
+  if (tab.status !== "running") throw new Error(`Browser turn ${traceId} is no longer running`);
+  if (tab.conversationKey !== conversationKey) {
+    throw new Error(`Browser turn ${traceId} does not own the requested steering conversation`);
+  }
+  return tab;
+}
+
+async function requestSteeringHandoff(host, { traceId, helperPid, conversationKey, connectorBound }) {
+  const tab = ownedTurnTab(host, traceId, helperPid, conversationKey);
+  const contents = tab.view?.webContents;
+  let stopRequested = false;
+  if (contents && !contents.isDestroyed()) {
+    stopRequested = await contents.executeJavaScript(`(() => {
+      const candidates = [...document.querySelectorAll(${JSON.stringify(CHATGPT_STOP_BUTTON_SELECTOR)})];
+      const stop = candidates.find(element => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return element.isConnected && rect.width > 0 && rect.height > 0
+          && style.display !== "none" && style.visibility !== "hidden";
+      });
+      if (!(stop instanceof HTMLElement)) return false;
+      stop.click();
+      return true;
+    })()`, true).catch(() => false);
+  }
+  return {
+    traceId,
+    helperPid,
+    conversationKey,
+    connectorBound: connectorBound === true,
+    tabId: tab.id,
+    stopRequested,
+  };
+}
+
+function completeSteeringHandoff(host, handoff) {
+  const tab = host?.turnTabs?.get(handoff.tabId);
+  if (!tab || tab.traceId !== handoff.traceId || tab.helperPid !== handoff.helperPid) {
+    throw new Error(`Browser steering handoff lost ownership of ${handoff.traceId}`);
+  }
+  if (tab.conversationKey !== handoff.conversationKey) {
+    throw new Error(`Browser steering handoff changed conversation identity for ${handoff.traceId}`);
+  }
+  tab.status = "ready";
+  tab.loading = false;
+  tab.message = "Ready for Codex steering";
+  tab.connectorBound = tab.connectorBound === true || handoff.connectorBound === true;
+  tab.lastHeartbeatAt = Date.now();
+  if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setBackgroundThrottling(true);
+  host.syncPowerSaveBlocker?.();
+  host.publishState?.(host.snapshot());
+  host.writeDescriptor?.();
+  return { retained: true, stopRequested: handoff.stopRequested === true };
+}
+
+module.exports = { completeSteeringHandoff, requestSteeringHandoff };
+''')
+
+          path = "launcher/electron/control-server.cjs"
+          text = read(path)
+          text = replace_once(
+              text,
+              'const { releaseRetainedConversation } = require("./retained-turn-release.cjs");\n',
+              'const { releaseRetainedConversation } = require("./retained-turn-release.cjs");\nconst { completeSteeringHandoff, requestSteeringHandoff } = require("./steering-handoff.cjs");\n',
+              "control-server steering import",
+          )
+          text = replace_once(
+              text,
+              '    this.token = randomBytes(32).toString("base64url");\n    this.port = 0;\n',
+              '    this.token = randomBytes(32).toString("base64url");\n    this.port = 0;\n    this.steeringHandoffs = new Map();\n',
+              "control-server steering registry",
+          )
+          text = replace_once(
+              text,
+              '''    const isTurn = request.url === "/v1/turn/start"\n      || request.url === "/v1/turn/heartbeat"\n      || request.url === "/v1/turn/end";''',
+              '''    const isTurn = request.url === "/v1/turn/start"\n      || request.url === "/v1/turn/heartbeat"\n      || request.url === "/v1/turn/handoff"\n      || request.url === "/v1/turn/end";''',
+              "control-server handoff route",
+          )
+          handoff_branch = '''      if (request.url === "/v1/turn/handoff") {\n        if (body.conversationKey === undefined) throw new Error("steering handoff requires conversationKey");\n        if (this.steeringHandoffs.has(body.traceId)) {\n          throw new Error(`Browser turn ${body.traceId} already has a pending steering handoff`);\n        }\n        const handoff = await requestSteeringHandoff(host, {\n          traceId: body.traceId,\n          helperPid: body.helperPid,\n          conversationKey: body.conversationKey,\n          connectorBound: body.connectorBound === true,\n        });\n        this.steeringHandoffs.set(body.traceId, handoff);\n        this.logger.info("browser.turn_steering_handoff_requested", { traceId: body.traceId });\n        writeJson(response, 200, { ok: true, retained: true, stopRequested: handoff.stopRequested });\n        return;\n      }\n'''
+          text = replace_once(
+              text,
+              '      const preferences = this.getPreferences();\n      if (request.url === "/v1/turn/start") {',
+              '      const preferences = this.getPreferences();\n' + handoff_branch + '      if (request.url === "/v1/turn/start") {',
+              "control-server handoff handler",
+          )
+          old_end = '''      } else {\n        if (![\'completed\', \'failed\', \'aborted\'].includes(body.status)) throw new Error("turn status is invalid");\n        const release = await host.endTurn(\n          body.traceId,'''
+          new_end = '''      } else {\n        if (![\'completed\', \'failed\', \'aborted\'].includes(body.status)) throw new Error("turn status is invalid");\n        const steeringHandoff = this.steeringHandoffs.get(body.traceId);\n        if (steeringHandoff && body.status !== "failed") {\n          this.steeringHandoffs.delete(body.traceId);\n          completeSteeringHandoff(host, steeringHandoff);\n          this.logger.info("browser.turn_steering_handoff_completed", { traceId: body.traceId, status: body.status });\n          writeJson(response, 200, { ok: true, cancelledByUser: false, retainedForSteering: true });\n          return;\n        }\n        if (steeringHandoff) this.steeringHandoffs.delete(body.traceId);\n        const release = await host.endTurn(\n          body.traceId,'''
+          text = replace_once(text, old_end, new_end, "control-server steering terminal interception")
+          write(path, text)
+
+          Path("launcher/tests/steering-handoff.test.cjs").write_text(r'''const test = require("node:test");
+const assert = require("node:assert/strict");
+const { completeSteeringHandoff, requestSteeringHandoff } = require("../electron/steering-handoff.cjs");
+
+test("steering reserves and retains the exact running browser conversation", async () => {
+  const calls = [];
+  const webContents = {
+    isDestroyed: () => false,
+    executeJavaScript: async () => { calls.push("stop"); return true; },
+    setBackgroundThrottling: value => calls.push(["throttle", value]),
+  };
+  const tab = {
+    id: "tab_1",
+    traceId: "trace_123456",
+    helperPid: 42,
+    conversationKey: "a".repeat(64),
+    connectorBound: false,
+    status: "running",
+    loading: true,
+    view: { webContents },
+  };
+  const host = {
+    turnTabs: new Map([[tab.id, tab]]),
+    syncPowerSaveBlocker: () => calls.push("power"),
+    publishState: () => calls.push("publish"),
+    writeDescriptor: () => calls.push("descriptor"),
+    snapshot: () => ({}),
+  };
+
+  const handoff = await requestSteeringHandoff(host, {
+    traceId: tab.traceId,
+    helperPid: 42,
+    conversationKey: tab.conversationKey,
+    connectorBound: true,
+  });
+  assert.equal(tab.status, "running");
+  assert.equal(handoff.stopRequested, true);
+
+  const completed = completeSteeringHandoff(host, handoff);
+  assert.equal(completed.retained, true);
+  assert.equal(tab.status, "ready");
+  assert.equal(tab.connectorBound, true);
+  assert.equal(tab.loading, false);
+  assert.ok(calls.includes("stop"));
+  assert.ok(calls.includes("power"));
+});
+''')
+
+          # ------------------------------------------------------------------
+          # Daemon-side launcher handoff client.
+          # ------------------------------------------------------------------
+          path = "src/launcher-browser-host.ts"
+          text = read(path)
+          marker = '''export async function releaseLauncherRetainedConversation(\n  descriptorPath: string,'''
+          if marker not in text:
+              raise SystemExit("launcher steering client insertion marker missing")
+          client = '''export async function handoffLauncherTurnForSteering(\n  descriptorPath: string,\n  input: { traceId: string; helperPid: number; conversationKey: string; connectorBound?: boolean },\n  timeoutMs = LAUNCHER_TURN_END_TIMEOUT_MS,\n): Promise<void> {\n  if (!/^[A-Za-z0-9_-]{6,128}$/.test(input.traceId)) throw new Error("Launcher steering trace id is invalid");\n  if (!Number.isInteger(input.helperPid) || input.helperPid < 1) throw new Error("Launcher steering helper pid is invalid");\n  if (!/^[a-f0-9]{64}$/.test(input.conversationKey)) throw new Error("Launcher steering conversation key is invalid");\n  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);\n  const controller = new AbortController();\n  const timer = setTimeout(() => controller.abort(), timeoutMs);\n  try {\n    const response = await fetch(`${descriptor.control.endpoint}/v1/turn/handoff`, {\n      method: "POST",\n      headers: {\n        authorization: `Bearer ${descriptor.control.token}`,\n        "content-type": "application/json",\n      },\n      body: JSON.stringify(input),\n      signal: controller.signal,\n    });\n    const body = await response.json().catch(() => ({})) as Record<string, unknown>;\n    if (!response.ok || body.retained !== true) {\n      const detail = typeof body.error === "string" ? `: ${body.error}` : "";\n      throw new Error(`HTTP ${response.status}${detail}`);\n    }\n  } catch (error) {\n    throw new Error(`Launcher steering handoff failed: ${error instanceof Error ? error.message : String(error)}`);\n  } finally {\n    clearTimeout(timer);\n  }\n}\n\n'''
+          text = text.replace(marker, client + marker, 1)
+          write(path, text)
+
+          # ------------------------------------------------------------------
+          # Turn registry: a different execution key for the same native turn is
+          # steering. Handoff the active browser instead of serializing behind it.
+          # ------------------------------------------------------------------
+          path = "src/adapters/chatgpt-web/turn-execution.ts"
+          text = read(path)
+          text = replace_once(
+              text,
+              '''  usageInput?: CodexParsedRequest;\n  conversationKey?: string;\n  releaseRetainedConversation?: () => Promise<void>;''',
+              '''  usageInput?: CodexParsedRequest;\n  conversationKey?: string;\n  /** Native Codex turn id that owns this browser execution. */\n  turnId?: string;\n  /** Stop the current generation while retaining the exact browser conversation for steering. */\n  handoffForSteering?: () => Promise<string>;\n  releaseRetainedConversation?: () => Promise<void>;''',
+              "turn runtime steering fields",
+          )
+          method_marker = '''  find(key: string): ChatGptTurnSession | undefined {'''
+          if method_marker not in text:
+              raise SystemExit("turn session steering method marker missing")
+          method = '''  async handoffActiveOwnerForSteering(\n    ownerKey: string,\n    turnId: string,\n    incomingKey: string,\n    signal?: AbortSignal,\n  ): Promise<string | undefined> {\n    const match = [...this.entries].find(([key, session]) => (\n      key !== incomingKey\n      && session.ownerKey === ownerKey\n      && session.runtime.turnId === turnId\n      && session.isActive()\n    ));\n    if (!match) return undefined;\n    const [key, session] = match;\n    const handoff = session.runtime.handoffForSteering;\n    const conversationKey = session.conversationKey();\n    if (!handoff || !conversationKey) return undefined;\n\n    const retainedKey = await awaitWithAbort(handoff(), signal);\n    if (retainedKey !== conversationKey) {\n      throw new Error("ChatGPT steering handoff returned a different browser conversation");\n    }\n    if (this.entries.get(key) !== session) {\n      throw new Error("ChatGPT steering source changed ownership during handoff");\n    }\n    this.entries.delete(key);\n    this.forgetConversationHead(session);\n\n    const retirement = session.physicalSettlement;\n    this.retirements.set(key, retirement);\n    const previousOwnerRetirement = this.ownerRetirements.get(ownerKey);\n    const ownerRetirement = previousOwnerRetirement\n      ? Promise.all([previousOwnerRetirement, retirement]).then(() => undefined)\n      : retirement;\n    this.ownerRetirements.set(ownerKey, ownerRetirement);\n    void retirement.then(() => {\n      if (this.retirements.get(key) === retirement) this.retirements.delete(key);\n    });\n    void ownerRetirement.then(() => {\n      if (this.ownerRetirements.get(ownerKey) === ownerRetirement) this.ownerRetirements.delete(ownerKey);\n    });\n    await awaitWithAbort(retirement, signal);\n    return retainedKey;\n  }\n\n'''
+          text = text.replace(method_marker, method + method_marker, 1)
+          write(path, text)
+
+          # Add registry-level regression tests.
+          path = "tests/turn-broker-lifecycle.test.ts"
+          text = read(path)
+          append = r'''
+
+test("same-turn steering hands off the active owner instead of waiting for normal completion", async () => {
+  const sessions = new ChatGptTurnSessions();
+  const conversationKey = "b".repeat(64);
+  let handoffs = 0;
+  let settlePhysical!: () => void;
+  const physicalSettlement = new Promise<void>(resolve => { settlePhysical = resolve; });
+  sessions.getOrCreate("old-revision", () => ({
+    mode: "read-only",
+    browser: new Promise<string>(() => {}),
+    physicalSettlement,
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    conversationKey,
+    turnId: "turn_same",
+    handoffForSteering: async () => {
+      handoffs += 1;
+      queueMicrotask(settlePhysical);
+      return conversationKey;
+    },
+    cancel: () => {},
+  }), "trace_old", "owner_same");
+
+  await expect(sessions.handoffActiveOwnerForSteering(
+    "owner_same",
+    "turn_same",
+    "new-revision",
+  )).resolves.toBe(conversationKey);
+  expect(handoffs).toBe(1);
+});
+
+test("a different native turn never steals an active browser as steering", async () => {
+  const sessions = new ChatGptTurnSessions();
+  let handoffs = 0;
+  sessions.getOrCreate("old-revision", () => ({
+    mode: "read-only",
+    browser: new Promise<string>(() => {}),
+    physicalSettlement: new Promise<void>(() => {}),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    conversationKey: "c".repeat(64),
+    turnId: "turn_old",
+    handoffForSteering: async () => { handoffs += 1; return "c".repeat(64); },
+    cancel: () => {},
+  }), "trace_old", "owner_same");
+
+  await expect(sessions.handoffActiveOwnerForSteering(
+    "owner_same",
+    "turn_new",
+    "new-revision",
+  )).resolves.toBeUndefined();
+  expect(handoffs).toBe(0);
+  sessions.clear();
+});
+'''
+          if 'same-turn steering hands off the active owner' not in text:
+              text += append
+          write(path, text)
+
+          # ------------------------------------------------------------------
+          # Adapter runtime: give every launcher turn a stable conversation key,
+          # and on a steering revision reserve/cancel/reuse that exact page.
+          # ------------------------------------------------------------------
+          path = "src/adapters/chatgpt-web/index.ts"
+          text = read(path)
+          text = replace_once(
+              text,
+              'import { releaseLauncherRetainedConversation } from "../../launcher-browser-host";',
+              'import { handoffLauncherTurnForSteering, releaseLauncherRetainedConversation } from "../../launcher-browser-host";',
+              "adapter steering launcher import",
+          )
+          text = replace_once(
+              text,
+              '''import {\n  chatGptConversationKey,\n  retainedConversationResumeRequest,\n} from "./conversation-key";''',
+              '''import {\n  chatGptConversationKey,\n  retainedConversationResumeRequest,\n  retainedConversationSteeringRequest,\n} from "./conversation-key";''',
+              "adapter steering resume import",
+          )
+          text = replace_once(
+              text,
+              '''    traceId: string,\n    turnCapabilities: ChatGptWebCapabilities,\n  ): ChatGptTurnRuntime => {''',
+              '''    traceId: string,\n    turnCapabilities: ChatGptWebCapabilities,\n    steeringConversationKey?: string,\n  ): ChatGptTurnRuntime => {''',
+              "startRuntime steering parameter",
+          )
+          old_conversation = '''    const conversationKey = !parsed._compactionRequest\n      && parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID\n      && mode.localTools\n      && retainedLauncherDescriptor\n      ? chatGptConversationKey(checkpointInput.parsed, executionNamespace)\n      : undefined;\n    const resumeInput = conversationKey\n      ? retainedConversationResumeRequest(checkpointInput.parsed)\n      : undefined;\n    const retainConversation = conversationKey !== undefined;\n    const releaseRetainedConversation = conversationKey && retainedLauncherDescriptor\n      ? async () => {\n        await releaseLauncherRetainedConversation(retainedLauncherDescriptor, conversationKey);\n      }\n      : undefined;'''
+          new_conversation = '''    const conversationKey = !parsed._compactionRequest\n      && retainedLauncherDescriptor\n      ? chatGptConversationKey(checkpointInput.parsed, executionNamespace)\n      : undefined;\n    if (steeringConversationKey && steeringConversationKey !== conversationKey) {\n      throw new Error("ChatGPT steering revision changed browser conversation identity");\n    }\n    const resumeInput = conversationKey\n      ? steeringConversationKey\n        ? retainedConversationSteeringRequest(checkpointInput.parsed)\n        : retainedConversationResumeRequest(checkpointInput.parsed)\n      : undefined;\n    if (steeringConversationKey && !resumeInput) {\n      throw new Error("ChatGPT steering revision has no user instruction to resume");\n    }\n    const retainConversation = conversationKey !== undefined && mode.localTools;\n    const releaseRetainedConversation = retainConversation && conversationKey && retainedLauncherDescriptor\n      ? async () => {\n        await releaseLauncherRetainedConversation(retainedLauncherDescriptor, conversationKey);\n      }\n      : undefined;'''
+          text = replace_once(text, old_conversation, new_conversation, "adapter conversation ownership")
+
+          lifecycle_marker = '''    const submissionLifecycle = parsed._compactionRequest ? {} : {\n      onSendActivated: () => { submission.phase = "send_activated" as const; },\n      onSubmitted: () => { submission.phase = "accepted" as const; },\n    };'''
+          steering_helper = lifecycle_marker + '''\n    const steeringHandoffFor = (cancelBrowser: () => void): (() => Promise<string>) | undefined => (\n      conversationKey && retainedLauncherDescriptor\n        ? async () => {\n          if (submission.phase !== "accepted") {\n            throw new ChatGptWebAdapterError(\n              "Codex steering arrived before ChatGPT had accepted the active prompt; refusing an ambiguous browser handoff.",\n              { status: 409, errorType: "invalid_request_error", code: "steering_handoff_ambiguous", retryable: true },\n            );\n          }\n          await handoffLauncherTurnForSteering(retainedLauncherDescriptor, {\n            traceId,\n            helperPid: process.pid,\n            conversationKey,\n            connectorBound: mode.localTools,\n          });\n          cancelBrowser();\n          return conversationKey;\n        }\n        : undefined\n    );'''
+          text = replace_once(text, lifecycle_marker, steering_helper, "adapter steering handoff helper")
+
+          old_readonly_prepare = '''        prepare: async () => ({\n          ...compileChatGptWebPrompt(\n            checkpointInput.parsed,\n            turnCapabilities,\n            undefined,\n            compileOptionsFor(checkpointInput.parsed),\n          ),\n          release: () => {},\n        }),\n        abortSignal: browserAbort.signal,'''
+          new_readonly_prepare = '''        prepare: async () => ({\n          ...compileChatGptWebPrompt(\n            checkpointInput.parsed,\n            turnCapabilities,\n            undefined,\n            compileOptionsFor(checkpointInput.parsed),\n          ),\n          release: () => {},\n        }),\n        ...(resumeInput ? {\n          prepareResume: async () => ({\n            ...compileChatGptWebPrompt(\n              resumeInput,\n              turnCapabilities,\n              undefined,\n              compileOptionsFor(resumeInput),\n            ),\n            release: () => {},\n          }),\n        } : {}),\n        ...(conversationKey ? { conversationKey } : {}),\n        ...(steeringConversationKey ? { requireRetainedConversation: true } : {}),\n        abortSignal: browserAbort.signal,'''
+          text = replace_once(text, old_readonly_prepare, new_readonly_prepare, "read-only steering browser preparation")
+
+          old_readonly_return = '''        usageInput: checkpointInput.parsed,\n        submission,\n        cancel: browserTurn.cancel,\n      };'''
+          new_readonly_return = '''        usageInput: checkpointInput.parsed,\n        ...(identity.turnId ? { turnId: identity.turnId } : {}),\n        ...(conversationKey ? { conversationKey } : {}),\n        ...(steeringHandoffFor(() => browserTurn.cancel()) ? {\n          handoffForSteering: steeringHandoffFor(() => browserTurn.cancel()),\n        } : {}),\n        submission,\n        cancel: browserTurn.cancel,\n      };'''
+          text = replace_once(text, old_readonly_return, new_readonly_return, "read-only steering runtime")
+
+          text = replace_once(
+              text,
+              '''      ...(retainConversation ? { retainConversation: true, conversationKey } : {}),\n      abortSignal: browserAbort.signal,''',
+              '''      ...(retainConversation ? { retainConversation: true, conversationKey } : conversationKey ? { conversationKey } : {}),\n      ...(steeringConversationKey ? { requireRetainedConversation: true } : {}),\n      abortSignal: browserAbort.signal,''',
+              "tool steering retained requirement",
+          )
+
+          old_tools_return = '''      usageInput: checkpointInput.parsed,\n      ...(conversationKey ? { conversationKey } : {}),\n      ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),\n      retireCapability: async () => {'''
+          new_tools_return = '''      usageInput: checkpointInput.parsed,\n      ...(identity.turnId ? { turnId: identity.turnId } : {}),\n      ...(conversationKey ? { conversationKey } : {}),\n      ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),\n      ...(steeringHandoffFor(() => browserTurn.cancel()) ? {\n        handoffForSteering: steeringHandoffFor(() => browserTurn.cancel()),\n      } : {}),\n      retireCapability: async () => {'''
+          text = replace_once(text, old_tools_return, new_tools_return, "tool steering runtime")
+
+          old_session = '''        const session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(\n          executionKey,\n          ownerKey,\n          () => startRuntime(parsed, environment, traceId, turnCapabilities),\n          traceId,\n          incoming.abortSignal,\n        );'''
+          new_session = '''        const identity = extractChatGptTurnIdentity(parsed);\n        const steeringConversationKey = identity.turnId\n          ? await chatGptTurnSessions.handoffActiveOwnerForSteering(\n            ownerKey,\n            identity.turnId,\n            executionKey,\n            incoming.abortSignal,\n          )\n          : undefined;\n        const session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(\n          executionKey,\n          ownerKey,\n          () => startRuntime(parsed, environment, traceId, turnCapabilities, steeringConversationKey),\n          traceId,\n          incoming.abortSignal,\n        );'''
+          text = replace_once(text, old_session, new_session, "adapter steering session selection")
+          write(path, text)
+
+          # Keep helper-facing session evidence aligned with regular-only launcher semantics.
+          for path in ["tests/launcher-browser-host.test.ts", "tests/browser-worker-contract.test.ts", "tests/chatgpt-web-harness.test.ts", "launcher/tests/runtime-host.test.cjs"]:
+              p = Path(path)
+              if not p.exists():
+                  continue
+              t = p.read_text()
+              t = t.replace("temporary: true", "regular: true")
+              t = t.replace("temporary: false", "regular: false")
+              t = t.replace(".temporary", ".regular")
+              t = t.replace("isTemporaryChatUrl", "isRegularChatUrl")
+              p.write_text(t)
+
+          # No runtime path may intentionally request Temporary Chat anymore.
+          functional = [
+              Path("src/chatgpt-session.ts"),
+              Path("src/adapters/chatgpt-web/browser-worker.ts"),
+              Path("launcher/electron/browser-host.cjs"),
+              Path("src/launcher-browser-host.ts"),
+          ]
+          for p in functional:
+              if "temporary-chat=true" in p.read_text():
+                  raise SystemExit(f"{p}: still contains temporary-chat=true")
+          PY
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
+        working-directory: launcher
+      - name: Verify
+        run: bun run verify
+      - name: Commit verified patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-live-steering-fix.yml
+          git add -A
+          git commit -m "fix: forward Codex steering into live web conversations"
+          git push origin HEAD:fix/live-codex-steering-regular-only
