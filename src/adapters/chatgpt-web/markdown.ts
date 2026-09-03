@@ -115,6 +115,11 @@ export class ChatGptMarkdownConsistencyError extends Error {
  * ranges for semantic blocks and marks a block streamable only after a following block exists.
  * Once committed, a missing prefix is harmless; changing text at a committed source range remains
  * an explicit protocol error because Responses deltas cannot be retracted.
+ *
+ * Source ranges are alignment hints, not a global ordering contract. ChatGPT can expose overlapping,
+ * duplicated, or locally-reset ranges while React reparents/hydrates final Markdown. When the
+ * visible committed tail proves DOM continuity, ambiguous pending ranges are therefore reconciled
+ * by semantic order instead of aborting an otherwise complete response.
  */
 export class ChatGptMarkdownBuffer {
   private readonly candidates = new Map<string, ChatGptMarkdownCandidate>();
@@ -142,9 +147,10 @@ export class ChatGptMarkdownBuffer {
     this.consistencyError = undefined;
     this.latest = reconciled.map(segment => ({ ...segment }));
 
+    const candidateIds = this.candidateIds(reconciled);
     const visibleCandidates = new Set<string>();
-    for (const segment of reconciled) {
-      const candidateId = this.candidateId(segment);
+    for (const [index, segment] of reconciled.entries()) {
+      const candidateId = candidateIds[index]!;
       visibleCandidates.add(candidateId);
       const previous = this.candidates.get(candidateId);
       const unchanged = previous
@@ -172,8 +178,7 @@ export class ChatGptMarkdownBuffer {
     let delta = "";
     let committedCount = 0;
     while (committedCount < reconciled.length) {
-      const segment = reconciled[committedCount]!;
-      const candidateId = this.candidateId(segment);
+      const candidateId = candidateIds[committedCount]!;
       const candidate = this.candidates.get(candidateId);
       if (!candidate?.streamable || candidate.streamableAt === undefined) break;
       if (now - Math.max(candidate.changedAt, candidate.streamableAt) < this.stabilityMs) break;
@@ -212,20 +217,24 @@ export class ChatGptMarkdownBuffer {
       .map(segment => segment.sourceEnd)
       .filter((end): end is number => end !== undefined)
       .at(-1);
+    const sourceIdentityCounts = new Map<string, number>();
+    for (const segment of segments) {
+      const identity = this.sourceIdentity(segment);
+      if (identity) sourceIdentityCounts.set(identity, (sourceIdentityCounts.get(identity) ?? 0) + 1);
+    }
     let highestCommittedIndex = -1;
     let sawPending = false;
-    let previousSourceStart: number | undefined;
+    let previousReliablePendingStart: number | undefined;
 
     for (const segment of segments) {
-      if (segment.sourceStart !== undefined) {
-        if (previousSourceStart !== undefined && segment.sourceStart <= previousSourceStart) {
-          return new ChatGptMarkdownConsistencyError(
-            "ChatGPT final DOM exposed non-monotonic source ranges",
-          );
-        }
-        previousSourceStart = segment.sourceStart;
-      }
-      const committedIndex = this.committedIndex(segment);
+      const sourceIdentity = this.sourceIdentity(segment);
+      const sourceIdentityAmbiguous = sourceIdentity !== undefined
+        && (sourceIdentityCounts.get(sourceIdentity) ?? 0) > 1;
+
+      // First protect the append-only ledger. A unique source range still identifies a committed
+      // block authoritatively. If ChatGPT duplicated that range in this snapshot, use unique
+      // semantic identity instead so the second block cannot be mistaken for the first one.
+      const committedIndex = this.committedIndex(segment, !sourceIdentityAmbiguous);
       if (committedIndex !== undefined) {
         const committed = this.committed[committedIndex]!;
         if (sawPending || committedIndex < highestCommittedIndex || committed.text !== segment.text) {
@@ -235,17 +244,37 @@ export class ChatGptMarkdownBuffer {
         continue;
       }
 
-      if (segment.sourceStart !== undefined && lastCommittedEnd !== undefined) {
-        if (segment.sourceStart <= lastCommittedEnd) return this.changedCommittedBlockError();
+      const overlapsCommittedRange = segment.sourceStart !== undefined
+        && lastCommittedEnd !== undefined
+        && segment.sourceStart <= lastCommittedEnd;
+      const nonMonotonicPendingRange = segment.sourceStart !== undefined
+        && previousReliablePendingStart !== undefined
+        && segment.sourceStart <= previousReliablePendingStart;
+      const sourceRangeReliable = segment.sourceStart !== undefined
+        && !sourceIdentityAmbiguous
+        && !overlapsCommittedRange
+        && !nonMonotonicPendingRange;
+
+      if (sourceRangeReliable) {
+        previousReliablePendingStart = segment.sourceStart;
         sawPending = true;
         pending.push(segment);
         continue;
       }
 
+      // Ambiguous ranges can occur when ChatGPT reparents multiple Markdown roots, hydrates
+      // citations, or reuses local data-start offsets. If the visible snapshot includes the last
+      // committed block, DOM order is enough to prove that everything following it is new pending
+      // text. Otherwise require continuity with the previously observed pending tail.
       const followsVisibleCommittedTail = highestCommittedIndex === this.committed.length - 1;
-      if (!followsVisibleCommittedTail && !this.matchesLatestPending(segment)) {
+      const alignmentSegment = segment.sourceStart === undefined
+        ? segment
+        : { ...segment, sourceStart: undefined, sourceEnd: undefined };
+      if (!followsVisibleCommittedTail && !this.matchesLatestPending(alignmentSegment)) {
         return new ChatGptMarkdownConsistencyError(
-          "ChatGPT final DOM could not be aligned with text already streamed to Codex",
+          nonMonotonicPendingRange
+            ? "ChatGPT final DOM exposed non-monotonic source ranges"
+            : "ChatGPT final DOM could not be aligned with text already streamed to Codex",
         );
       }
       sawPending = true;
@@ -255,15 +284,26 @@ export class ChatGptMarkdownBuffer {
     return pending;
   }
 
-  private committedIndex(segment: ChatGptMarkdownSegment): number | undefined {
-    const exact = this.committed.findIndex(committed => (
-      segment.sourceStart !== undefined && committed.sourceStart !== undefined
-        ? segment.sourceStart === committed.sourceStart && segment.tag === committed.tag
-        : segment.key === committed.key
-    ));
-    if (exact >= 0) return exact;
+  private sourceIdentity(segment: ChatGptMarkdownSegment): string | undefined {
+    return segment.sourceStart !== undefined
+      ? `${segment.sourceStart}:${segment.tag ?? ""}`
+      : undefined;
+  }
 
-    if (segment.sourceStart !== undefined) return undefined;
+  private committedIndex(
+    segment: ChatGptMarkdownSegment,
+    sourceIdentityReliable = true,
+  ): number | undefined {
+    if (sourceIdentityReliable) {
+      const exact = this.committed.findIndex(committed => (
+        segment.sourceStart !== undefined && committed.sourceStart !== undefined
+          ? segment.sourceStart === committed.sourceStart && segment.tag === committed.tag
+          : segment.key === committed.key
+      ));
+      if (exact >= 0) return exact;
+      if (segment.sourceStart !== undefined) return undefined;
+    }
+
     if (!segment.tag) return undefined;
     const semanticMatches = this.committed
       .map((committed, index) => ({ committed, index }))
@@ -285,10 +325,16 @@ export class ChatGptMarkdownBuffer {
     )).length === 1;
   }
 
-  private candidateId(segment: ChatGptMarkdownSegment): string {
-    return segment.sourceStart !== undefined
-      ? `source:${segment.sourceStart}:${segment.tag ?? ""}`
-      : `key:${segment.key}`;
+  private candidateIds(segments: ChatGptMarkdownSegment[]): string[] {
+    const occurrences = new Map<string, number>();
+    return segments.map(segment => {
+      const base = segment.sourceStart !== undefined
+        ? `source:${segment.sourceStart}:${segment.tag ?? ""}`
+        : `key:${segment.key}`;
+      const occurrence = occurrences.get(base) ?? 0;
+      occurrences.set(base, occurrence + 1);
+      return occurrence === 0 ? base : `${base}:occurrence:${occurrence}`;
+    });
   }
 
   private committedSegment(segment: ChatGptMarkdownSegment): CommittedChatGptMarkdownSegment {

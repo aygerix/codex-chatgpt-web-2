@@ -1,11 +1,7 @@
 import type { Locator, Page } from "playwright-core";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 
-export const CHATGPT_REGULAR_CHAT_URL = "https://chatgpt.com/";
-export const CHATGPT_NEW_CHAT_URL = CHATGPT_REGULAR_CHAT_URL;
-
-/** Legacy import name retained for the browser worker; it now always means regular ChatGPT. */
-export const CHATGPT_TEMPORARY_CHAT_URL = CHATGPT_NEW_CHAT_URL;
+export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 
 export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
@@ -81,12 +77,13 @@ export async function assertAuthenticatedChatGptPage(page: Page): Promise<void> 
   }
 }
 
-/** Legacy assertion name retained for the worker; only regular/history-backed chats are valid. */
 export async function assertTemporaryChatPage(page: Page): Promise<void> {
   const url = new URL(page.url());
-  const expected = new URL(CHATGPT_NEW_CHAT_URL);
-  if (url.origin !== expected.origin || url.searchParams.has("temporary-chat")) {
-    throw new Error(`ChatGPT left the regular chat surface (${page.url()})`);
+  const expected = new URL(CHATGPT_TEMPORARY_CHAT_URL);
+  if (url.origin !== expected.origin
+    || url.pathname !== expected.pathname
+    || url.searchParams.get("temporary-chat") !== "true") {
+    throw new Error(`ChatGPT left the isolated Temporary Chat surface (${page.url()})`);
   }
 }
 
