@@ -22,6 +22,7 @@ const CONVERSATION_HISTORY_RATE_LIMIT_RECOVERY_SCRIPT = String.raw`
     '[data-testid="modal-conversation-history-rate-limit"]',
   ].join(", ");
   const attemptedDismiss = new WeakSet();
+  const fallbackApplied = new WeakSet();
 
   const rendered = (element) => {
     if (!(element instanceof HTMLElement) || !element.isConnected) return false;
@@ -52,7 +53,7 @@ const CONVERSATION_HISTORY_RATE_LIMIT_RECOVERY_SCRIPT = String.raw`
 
     const body = document.body;
     const html = document.documentElement;
-    if (body) body.removeAttribute("data-scroll-locked");
+    if (body?.hasAttribute("data-scroll-locked")) body.removeAttribute("data-scroll-locked");
 
     for (const element of [html, body]) {
       if (!element) continue;
@@ -108,14 +109,17 @@ const CONVERSATION_HISTORY_RATE_LIMIT_RECOVERY_SCRIPT = String.raw`
     // portal that owns this exact dialog, then undo the modal library's interaction locks. Do not
     // unlock the background while any other visible dialog is open.
     const portal = topLevelPortal(historyDialog);
-    if (portal instanceof HTMLElement) {
-      portal.style.setProperty("display", "none", "important");
-      portal.style.setProperty("visibility", "hidden", "important");
-      portal.style.setProperty("pointer-events", "none", "important");
-    } else {
-      historyDialog.style.setProperty("display", "none", "important");
-      historyDialog.style.setProperty("visibility", "hidden", "important");
-      historyDialog.style.setProperty("pointer-events", "none", "important");
+    if (!fallbackApplied.has(historyDialog)) {
+      fallbackApplied.add(historyDialog);
+      if (portal instanceof HTMLElement) {
+        portal.style.setProperty("display", "none", "important");
+        portal.style.setProperty("visibility", "hidden", "important");
+        portal.style.setProperty("pointer-events", "none", "important");
+      } else {
+        historyDialog.style.setProperty("display", "none", "important");
+        historyDialog.style.setProperty("visibility", "hidden", "important");
+        historyDialog.style.setProperty("pointer-events", "none", "important");
+      }
     }
     restoreBackgroundInteraction(historyDialog, portal);
     return true;
