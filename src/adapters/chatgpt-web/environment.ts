@@ -28,6 +28,7 @@ export interface ChatGptTurnIdentity {
 export interface ChatGptThreadSpawnLineage {
   threadId: string;
   parentThreadId: string;
+  parentTurnId: string;
   agentName: string;
   sandboxType: ChatGptSandboxPolicy["type"];
   workspaceRoots: string[];
@@ -110,12 +111,20 @@ function isTurnAbortedNotice(value: Record<string, unknown>): boolean {
  * under the same logical task revision.
  */
 export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unknown {
-  const turnId = extractChatGptTurnIdentity(parsed).turnId;
+  const identity = extractChatGptTurnIdentity(parsed);
+  const turnId = identity.turnId;
   if (!turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
   const revision = latestChatGptTurnUserRevision(parsed, turnId);
   if (!revision) throw new Error("ChatGPT web requires a current-turn user message for browser-session replay");
   if (revision.turnId !== undefined && revision.turnId !== turnId) {
-    throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);
+    // Native Codex stamps a freshly spawned child's first task message with the parent turn that
+    // caused the spawn while the provider request itself already owns the new child turn. Accept
+    // that one mismatch only when the complete canonical thread-spawn lineage proves it exactly.
+    const lineage = extractChatGptThreadSpawnLineage(parsed);
+    const canonicalParentTask = lineage !== undefined
+      && lineage.threadId === identity.threadId
+      && lineage.parentTurnId === revision.turnId;
+    if (!canonicalParentTask) throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);
   }
   return revision.content;
 }
@@ -569,9 +578,12 @@ export function extractChatGptThreadSpawnLineage(
   const metadata = clientTurnMetadata(parsed);
   if (!metadata || metadata.request_kind !== "turn" || metadata.subagent_kind !== "thread_spawn") return undefined;
   const threadId = typeof metadata.thread_id === "string" ? metadata.thread_id.trim() : "";
+  const turnId = typeof metadata.turn_id === "string" ? metadata.turn_id.trim() : "";
   const parentThreadId = typeof metadata.parent_thread_id === "string" ? metadata.parent_thread_id.trim() : "";
+  const parentTurnId = typeof metadata.parent_turn_id === "string" ? metadata.parent_turn_id.trim() : "";
   const agentName = typeof metadata.agent_name === "string" ? metadata.agent_name.trim() : "";
-  if (!threadId || !parentThreadId || threadId === parentThreadId || !/^\/root\/.+/.test(agentName)) return undefined;
+  if (!threadId || !turnId || !parentThreadId || !parentTurnId
+    || threadId === parentThreadId || turnId === parentTurnId || !/^\/root\/.+/.test(agentName)) return undefined;
 
   const sandboxType = sandboxTypeFromMetadata(canonicalSandboxMetadata(metadata));
   if (!sandboxType || sandboxType === "platform") return undefined;
@@ -579,5 +591,5 @@ export function extractChatGptThreadSpawnLineage(
   const workspacePaths = workspaces ? Object.keys(workspaces) : [];
   if (workspacePaths.some(path => !isAbsolute(path))) return undefined;
   const workspaceRoots = [...new Set(workspacePaths.map(path => resolve(path)))];
-  return { threadId, parentThreadId, agentName, sandboxType, workspaceRoots };
+  return { threadId, parentThreadId, parentTurnId, agentName, sandboxType, workspaceRoots };
 }
