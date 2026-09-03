@@ -273,7 +273,7 @@ export async function inspectLauncherBrowserHost(
     });
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : `HTTP ${response.status}`);
-    if (body.authenticated !== true || body.temporary !== true || typeof body.url !== "string") {
+    if (body.authenticated !== true || body.regular !== true || typeof body.url !== "string") {
       throw new Error("Launcher returned invalid ChatGPT session evidence");
     }
     if (options.detectCapabilities
@@ -404,6 +404,38 @@ export async function notifyLauncherTurn(
     if (error instanceof LauncherBrowserTurnCancelledError
       || error instanceof LauncherRetainedConversationUnavailableError) throw error;
     throw new Error(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function handoffLauncherTurnForSteering(
+  descriptorPath: string,
+  input: { traceId: string; conversationKey: string; connectorBound?: boolean },
+  timeoutMs = LAUNCHER_TURN_END_TIMEOUT_MS,
+): Promise<void> {
+  if (!/^[A-Za-z0-9_-]{6,128}$/.test(input.traceId)) throw new Error("Launcher steering trace id is invalid");
+  if (!/^[a-f0-9]{64}$/.test(input.conversationKey)) throw new Error("Launcher steering conversation key is invalid");
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${descriptor.control.endpoint}/v1/turn/handoff`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${descriptor.control.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(input),
+      signal: controller.signal,
+    });
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (!response.ok || body.retained !== true) {
+      const detail = typeof body.error === "string" ? `: ${body.error}` : "";
+      throw new Error(`HTTP ${response.status}${detail}`);
+    }
+  } catch (error) {
+    throw new Error(`Launcher steering handoff failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     clearTimeout(timer);
   }

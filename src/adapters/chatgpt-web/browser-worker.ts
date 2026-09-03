@@ -2009,7 +2009,7 @@ export class ChatGptBrowserWorker {
 
   inspectSession(detectCapabilities: boolean): Promise<{
     authenticated: true;
-    temporary: true;
+    regular: true;
     url: string;
     solAvailable?: boolean;
     proAvailable?: boolean;
@@ -3383,7 +3383,7 @@ export class ChatGptBrowserWorker {
 
   private async inspectSessionExclusive(detectCapabilities: boolean): Promise<{
     authenticated: true;
-    temporary: true;
+    regular: true;
     url: string;
     solAvailable?: boolean;
     proAvailable?: boolean;
@@ -3391,9 +3391,9 @@ export class ChatGptBrowserWorker {
     const page = await this.ensurePage();
     await this.prepareTemporaryChatSurface(page);
     const url = page.url();
-    if (!detectCapabilities) return { authenticated: true, temporary: true, url };
+    if (!detectCapabilities) return { authenticated: true, regular: true, url };
     const capabilities = await detectChatGptAccountCapabilities(page);
-    return { authenticated: true, temporary: true, url, ...capabilities };
+    return { authenticated: true, regular: true, url, ...capabilities };
   }
 
   private async smokeTestExclusive(abortSignal?: AbortSignal): Promise<{ effort: string; response: string }> {
@@ -3886,7 +3886,7 @@ export class ChatGptBrowserWorker {
       helperPid: process.pid,
       ...(turn.conversationKey ? { conversationKey: turn.conversationKey } : {}),
       ...((turn.conversationKey
-        && (turn.nativeConnector || turn.capabilities.localToolsEnabled || turn.requireRetainedConversation))
+        && (turn.nativeConnector || turn.capabilities.localToolsEnabled))
         ? { connectorIdentity: this.config.appName }
         : {}),
       ...(turn.requireRetainedConversation ? { requireRetainedConversation: true } : {}),
