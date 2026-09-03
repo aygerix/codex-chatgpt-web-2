@@ -14,6 +14,8 @@ text = p.read_text()
 text = text.replace('https://chatgpt.com/?temporary-chat=true', 'https://chatgpt.com/')
 text = text.replace('temporary: true', 'regular: true')
 text = text.replace('temporary: false', 'regular: false')
+text = text.replace('temporary: primaryReady', 'regular: primaryReady')
+text = text.replace('temporary: currentUrl === "https://chatgpt.com/"', 'regular: currentUrl === "https://chatgpt.com/"')
 text = text.replace('.temporary', '.regular')
 text = text.replace('Temporary Chat', 'regular ChatGPT')
 # Initial staging already renamed the helper predicate import/calls.
