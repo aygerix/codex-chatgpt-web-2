@@ -146,6 +146,10 @@ interface ChatGptTurnRuntimeBase {
   text: ChatGptTextFeed;
   usageInput?: CodexParsedRequest;
   conversationKey?: string;
+  /** Native Codex turn id that owns this browser execution. */
+  turnId?: string;
+  /** Stop the current generation while retaining the exact browser conversation for steering. */
+  handoffForSteering?: () => Promise<string>;
   releaseRetainedConversation?: () => Promise<void>;
   /** Idempotently retire the turn-bound MCP capability after browser and observer settlement. */
   retireCapability?: () => void | Promise<void>;
@@ -543,6 +547,51 @@ export class ChatGptTurnSessions {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       return this.getOrCreate(key, start, traceId, ownerKey);
     }
+  }
+
+  async handoffActiveOwnerForSteering(
+    ownerKey: string,
+    turnId: string,
+    incomingKey: string,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
+    const match = [...this.entries].find(([key, session]) => (
+      key !== incomingKey
+      && session.ownerKey === ownerKey
+      && session.runtime.turnId === turnId
+      && session.isActive()
+    ));
+    if (!match) return undefined;
+    const [key, session] = match;
+    const handoff = session.runtime.handoffForSteering;
+    const conversationKey = session.conversationKey();
+    if (!handoff || !conversationKey) return undefined;
+
+    const retainedKey = await awaitWithAbort(handoff(), signal);
+    if (retainedKey !== conversationKey) {
+      throw new Error("ChatGPT steering handoff returned a different browser conversation");
+    }
+    if (this.entries.get(key) !== session) {
+      throw new Error("ChatGPT steering source changed ownership during handoff");
+    }
+    this.entries.delete(key);
+    this.forgetConversationHead(session);
+
+    const retirement = session.physicalSettlement;
+    this.retirements.set(key, retirement);
+    const previousOwnerRetirement = this.ownerRetirements.get(ownerKey);
+    const ownerRetirement = previousOwnerRetirement
+      ? Promise.all([previousOwnerRetirement, retirement]).then(() => undefined)
+      : retirement;
+    this.ownerRetirements.set(ownerKey, ownerRetirement);
+    void retirement.then(() => {
+      if (this.retirements.get(key) === retirement) this.retirements.delete(key);
+    });
+    void ownerRetirement.then(() => {
+      if (this.ownerRetirements.get(ownerKey) === ownerRetirement) this.ownerRetirements.delete(ownerKey);
+    });
+    await awaitWithAbort(retirement, signal);
+    return retainedKey;
   }
 
   find(key: string): ChatGptTurnSession | undefined {

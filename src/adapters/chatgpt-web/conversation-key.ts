@@ -43,6 +43,21 @@ export function chatGptConversationKey(
 }
 
 /** Full history remains canonical; a retained epoch receives only the suffix after its last assistant reply. */
+/** A live Codex steering revision reuses the browser conversation and sends only the new instruction. */
+export function retainedConversationSteeringRequest(
+  parsed: CodexParsedRequest,
+): CodexParsedRequest | undefined {
+  const latestUser = parsed.context.messages.findLast(message => message.role === "user");
+  if (!latestUser) return undefined;
+  return {
+    ...parsed,
+    context: {
+      ...parsed.context,
+      messages: [latestUser],
+    },
+  };
+}
+
 export function retainedConversationResumeRequest(
   parsed: CodexParsedRequest,
 ): CodexParsedRequest | undefined {

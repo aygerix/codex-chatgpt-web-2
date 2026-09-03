@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import {
-  CHATGPT_CHAT_SURFACE,
   CHATGPT_COMPOSER_SELECTOR,
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_MENU_SELECTOR,
@@ -8,19 +7,11 @@ import {
   CHATGPT_NEW_CHAT_URL,
   CHATGPT_REGULAR_CHAT_URL,
   detectChatGptAccountCapabilities,
-  resolveChatGptChatSurface,
 } from "../src/chatgpt-session";
 
-test("regular history-backed chats are the default surface", () => {
-  expect(CHATGPT_CHAT_SURFACE).toBe("regular");
+test("regular history-backed chats are the only surface", () => {
   expect(CHATGPT_NEW_CHAT_URL).toBe(CHATGPT_REGULAR_CHAT_URL);
   expect(CHATGPT_NEW_CHAT_URL).toBe("https://chatgpt.com/");
-});
-
-test("temporary chats remain an explicit opt-in surface", () => {
-  expect(resolveChatGptChatSurface("temporary")).toBe("temporary");
-  expect(resolveChatGptChatSurface(" regular ")).toBe("regular");
-  expect(() => resolveChatGptChatSurface("ephemeral")).toThrow(/regular.*temporary/i);
 });
 
 test("login keeps the established turn composer contract", () => {

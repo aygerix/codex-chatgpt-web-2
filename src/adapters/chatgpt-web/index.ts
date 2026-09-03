@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
-import { releaseLauncherRetainedConversation } from "../../launcher-browser-host";
+import { handoffLauncherTurnForSteering, releaseLauncherRetainedConversation } from "../../launcher-browser-host";
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
@@ -35,6 +35,7 @@ import {
 import {
   chatGptConversationKey,
   retainedConversationResumeRequest,
+  retainedConversationSteeringRequest,
 } from "./conversation-key";
 
 function brokerSocketPath(provider: CodexProviderConfig): string {
@@ -286,6 +287,7 @@ export function createChatGptWebAdapter(
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
+    steeringConversationKey?: string,
   ): ChatGptTurnRuntime => {
     const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     const identity = extractChatGptTurnIdentity(parsed);
@@ -296,16 +298,22 @@ export function createChatGptWebAdapter(
       ? lunaCheckpointStore.apply(parsed)
       : { parsed, applied: false };
     const conversationKey = !parsed._compactionRequest
-      && parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID
-      && mode.localTools
       && retainedLauncherDescriptor
       ? chatGptConversationKey(checkpointInput.parsed, executionNamespace)
       : undefined;
+    if (steeringConversationKey && steeringConversationKey !== conversationKey) {
+      throw new Error("ChatGPT steering revision changed browser conversation identity");
+    }
     const resumeInput = conversationKey
-      ? retainedConversationResumeRequest(checkpointInput.parsed)
+      ? steeringConversationKey
+        ? retainedConversationSteeringRequest(checkpointInput.parsed)
+        : retainedConversationResumeRequest(checkpointInput.parsed)
       : undefined;
+    if (steeringConversationKey && !resumeInput) {
+      throw new Error("ChatGPT steering revision has no user instruction to resume");
+    }
     const retainConversation = conversationKey !== undefined;
-    const releaseRetainedConversation = conversationKey && retainedLauncherDescriptor
+    const releaseRetainedConversation = retainConversation && conversationKey && retainedLauncherDescriptor
       ? async () => {
         await releaseLauncherRetainedConversation(retainedLauncherDescriptor, conversationKey);
       }
@@ -351,6 +359,25 @@ export function createChatGptWebAdapter(
       onSendActivated: () => { submission.phase = "send_activated" as const; },
       onSubmitted: () => { submission.phase = "accepted" as const; },
     };
+    const steeringHandoffFor = (cancelBrowser: () => void): (() => Promise<string>) | undefined => (
+      conversationKey && retainedLauncherDescriptor
+        ? async () => {
+          if (submission.phase !== "accepted") {
+            throw new ChatGptWebAdapterError(
+              "Codex steering arrived before ChatGPT had accepted the active prompt; refusing an ambiguous browser handoff.",
+              { status: 409, errorType: "invalid_request_error", code: "steering_handoff_ambiguous", retryable: true },
+            );
+          }
+          await handoffLauncherTurnForSteering(retainedLauncherDescriptor, {
+            traceId,
+            conversationKey,
+            connectorBound: mode.localTools,
+          });
+          cancelBrowser();
+          return conversationKey;
+        }
+        : undefined
+    );
     if (!mode.localTools) {
       const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
         traceId,
@@ -366,6 +393,19 @@ export function createChatGptWebAdapter(
           ),
           release: () => {},
         }),
+        ...(resumeInput ? {
+          prepareResume: async () => ({
+            ...compileChatGptWebPrompt(
+              resumeInput,
+              turnCapabilities,
+              undefined,
+              compileOptionsFor(resumeInput),
+            ),
+            release: () => {},
+          }),
+        } : {}),
+        ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
+        ...(steeringConversationKey ? { requireRetainedConversation: true } : {}),
         abortSignal: browserAbort.signal,
         ...(parsed._compactionRequest ? { compaction: true } : {}),
         ...submissionLifecycle,
@@ -384,6 +424,12 @@ export function createChatGptWebAdapter(
         trace,
         text,
         usageInput: checkpointInput.parsed,
+        ...(identity.turnId ? { turnId: identity.turnId } : {}),
+        ...(conversationKey ? { conversationKey } : {}),
+        ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),
+        ...(steeringHandoffFor(() => browserTurn.cancel()) ? {
+          handoffForSteering: steeringHandoffFor(() => browserTurn.cancel()),
+        } : {}),
         submission,
         cancel: browserTurn.cancel,
       };
@@ -425,7 +471,8 @@ export function createChatGptWebAdapter(
       capabilities: turnCapabilities,
       prepare: () => prepareWith(checkpointInput.parsed),
       ...(resumeInput ? { prepareResume: () => prepareWith(resumeInput) } : {}),
-      ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
+      ...(retainConversation ? { retainConversation: true, conversationKey } : conversationKey ? { conversationKey } : {}),
+      ...(steeringConversationKey ? { requireRetainedConversation: true } : {}),
       abortSignal: browserAbort.signal,
       ...(parsed._compactionRequest ? { compaction: true } : {}),
       ...submissionLifecycle,
@@ -457,8 +504,12 @@ export function createChatGptWebAdapter(
       trace,
       text,
       usageInput: checkpointInput.parsed,
+      ...(identity.turnId ? { turnId: identity.turnId } : {}),
       ...(conversationKey ? { conversationKey } : {}),
       ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),
+      ...(steeringHandoffFor(() => browserTurn.cancel()) ? {
+        handoffForSteering: steeringHandoffFor(() => browserTurn.cancel()),
+      } : {}),
       retireCapability: async () => {
         if (activeToken) await broker.revoke(activeToken);
       },
@@ -710,10 +761,19 @@ export function createChatGptWebAdapter(
         const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
         const ownerKey = `${executionNamespace}:${chatGptThreadOwnershipKey(parsed)}`;
         const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
+        const identity = extractChatGptTurnIdentity(parsed);
+        const steeringConversationKey = identity.turnId
+          ? await chatGptTurnSessions.handoffActiveOwnerForSteering(
+            ownerKey,
+            identity.turnId,
+            executionKey,
+            incoming.abortSignal,
+          )
+          : undefined;
         const session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
           executionKey,
           ownerKey,
-          () => startRuntime(parsed, environment, traceId, turnCapabilities),
+          () => startRuntime(parsed, environment, traceId, turnCapabilities, steeringConversationKey),
           traceId,
           incoming.abortSignal,
         );

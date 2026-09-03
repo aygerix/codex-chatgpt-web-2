@@ -319,3 +319,58 @@ test("turn broker names the finished turn that owns a replayed handle", async ()
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test("same-turn steering hands off the active owner instead of waiting for normal completion", async () => {
+  const sessions = new ChatGptTurnSessions();
+  const conversationKey = "b".repeat(64);
+  let handoffs = 0;
+  let settlePhysical!: () => void;
+  const physicalSettlement = new Promise<void>(resolve => { settlePhysical = resolve; });
+  sessions.getOrCreate("old-revision", () => ({
+    mode: "read-only",
+    browser: new Promise<string>(() => {}),
+    physicalSettlement,
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    conversationKey,
+    turnId: "turn_same",
+    handoffForSteering: async () => {
+      handoffs += 1;
+      queueMicrotask(settlePhysical);
+      return conversationKey;
+    },
+    cancel: () => {},
+  }), "trace_old", "owner_same");
+
+  await expect(sessions.handoffActiveOwnerForSteering(
+    "owner_same",
+    "turn_same",
+    "new-revision",
+  )).resolves.toBe(conversationKey);
+  expect(handoffs).toBe(1);
+});
+
+test("a different native turn never steals an active browser as steering", async () => {
+  const sessions = new ChatGptTurnSessions();
+  let handoffs = 0;
+  sessions.getOrCreate("old-revision", () => ({
+    mode: "read-only",
+    browser: new Promise<string>(() => {}),
+    physicalSettlement: new Promise<void>(() => {}),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    conversationKey: "c".repeat(64),
+    turnId: "turn_old",
+    handoffForSteering: async () => { handoffs += 1; return "c".repeat(64); },
+    cancel: () => {},
+  }), "trace_old", "owner_same");
+
+  await expect(sessions.handoffActiveOwnerForSteering(
+    "owner_same",
+    "turn_new",
+    "new-revision",
+  )).resolves.toBeUndefined();
+  expect(handoffs).toBe(0);
+  sessions.clear();
+});

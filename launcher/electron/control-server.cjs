@@ -1,6 +1,7 @@
 const { createServer } = require("node:http");
 const { randomBytes, timingSafeEqual } = require("node:crypto");
 const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
+const { completeSteeringHandoff, requestSteeringHandoff } = require("./steering-handoff.cjs");
 
 const MAX_BODY_BYTES = 16 * 1024;
 
@@ -42,6 +43,7 @@ class BrowserControlServer {
     this.getPreferences = getPreferences;
     this.token = randomBytes(32).toString("base64url");
     this.port = 0;
+    this.steeringHandoffs = new Map();
     this.server = createServer((request, response) => {
       void this.handle(request, response).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -93,6 +95,7 @@ class BrowserControlServer {
     }
     const isTurn = request.url === "/v1/turn/start"
       || request.url === "/v1/turn/heartbeat"
+      || request.url === "/v1/turn/handoff"
       || request.url === "/v1/turn/end";
     const isTurnRelease = request.url === "/v1/turn/release";
     const isSessionInspect = request.url === "/v1/session/inspect";
@@ -121,7 +124,8 @@ class BrowserControlServer {
       if (!body || typeof body !== "object" || !/^[A-Za-z0-9_-]{6,128}$/.test(body.traceId || "")) {
         throw new Error("traceId is invalid");
       }
-      if (!Number.isInteger(body.helperPid) || body.helperPid < 1) {
+      if (request.url !== "/v1/turn/handoff"
+        && (!Number.isInteger(body.helperPid) || body.helperPid < 1)) {
         throw new Error("browser helper pid is invalid");
       }
       if (body.conversationKey !== undefined && !/^[a-f0-9]{64}$/.test(body.conversationKey)) {
@@ -156,6 +160,21 @@ class BrowserControlServer {
         throw new Error("refreshViewport is only valid for a turn heartbeat");
       }
       const preferences = this.getPreferences();
+      if (request.url === "/v1/turn/handoff") {
+        if (body.conversationKey === undefined) throw new Error("steering handoff requires conversationKey");
+        if (this.steeringHandoffs.has(body.traceId)) {
+          throw new Error(`Browser turn ${body.traceId} already has a pending steering handoff`);
+        }
+        const handoff = await requestSteeringHandoff(host, {
+          traceId: body.traceId,
+          conversationKey: body.conversationKey,
+          connectorBound: body.connectorBound === true,
+        });
+        this.steeringHandoffs.set(body.traceId, handoff);
+        this.logger.info("browser.turn_steering_handoff_requested", { traceId: body.traceId });
+        writeJson(response, 200, { ok: true, retained: true, stopRequested: handoff.stopRequested });
+        return;
+      }
       if (request.url === "/v1/turn/start") {
         const lease = host.beginTurn(
           body.traceId,
@@ -175,6 +194,15 @@ class BrowserControlServer {
         return;
       } else {
         if (!['completed', 'failed', 'aborted'].includes(body.status)) throw new Error("turn status is invalid");
+        const steeringHandoff = this.steeringHandoffs.get(body.traceId);
+        if (steeringHandoff && body.status !== "failed") {
+          this.steeringHandoffs.delete(body.traceId);
+          completeSteeringHandoff(host, steeringHandoff);
+          this.logger.info("browser.turn_steering_handoff_completed", { traceId: body.traceId, status: body.status });
+          writeJson(response, 200, { ok: true, cancelledByUser: false, retainedForSteering: true });
+          return;
+        }
+        if (steeringHandoff) this.steeringHandoffs.delete(body.traceId);
         const release = await host.endTurn(
           body.traceId,
           body.helperPid,
