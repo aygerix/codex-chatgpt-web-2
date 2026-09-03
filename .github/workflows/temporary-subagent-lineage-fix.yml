@@ -1,0 +1,139 @@
+name: Temporary subagent parent-turn lineage fix
+
+on:
+  push:
+    branches:
+      - fix/subagent-parent-turn-lineage
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/subagent-parent-turn-lineage
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Patch authenticated parent-turn lineage
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one occurrence, found {count}: {old[:180]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          path = "src/adapters/chatgpt-web/environment.ts"
+          once(path,
+          '''export interface ChatGptThreadSpawnLineage {\n  threadId: string;\n  parentThreadId: string;\n  agentName: string;\n  sandboxType: ChatGptSandboxPolicy["type"];\n  workspaceRoots: string[];\n}''',
+          '''export interface ChatGptThreadSpawnLineage {\n  threadId: string;\n  parentThreadId: string;\n  parentTurnId: string;\n  agentName: string;\n  sandboxType: ChatGptSandboxPolicy["type"];\n  workspaceRoots: string[];\n}''')
+
+          once(path,
+          '''export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unknown {\n  const turnId = extractChatGptTurnIdentity(parsed).turnId;\n  if (!turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");\n  const revision = latestChatGptTurnUserRevision(parsed, turnId);\n  if (!revision) throw new Error("ChatGPT web requires a current-turn user message for browser-session replay");\n  if (revision.turnId !== undefined && revision.turnId !== turnId) {\n    throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);\n  }\n  return revision.content;\n}''',
+          '''export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unknown {\n  const identity = extractChatGptTurnIdentity(parsed);\n  const turnId = identity.turnId;\n  if (!turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");\n  const revision = latestChatGptTurnUserRevision(parsed, turnId);\n  if (!revision) throw new Error("ChatGPT web requires a current-turn user message for browser-session replay");\n  if (revision.turnId !== undefined && revision.turnId !== turnId) {\n    // Native Codex stamps a freshly spawned child's first task message with the parent turn that\n    // caused the spawn while the provider request itself already owns the new child turn. Accept\n    // that one mismatch only when the complete canonical thread-spawn lineage proves it exactly.\n    const lineage = extractChatGptThreadSpawnLineage(parsed);\n    const canonicalParentTask = lineage !== undefined\n      && lineage.threadId === identity.threadId\n      && lineage.parentTurnId === revision.turnId;\n    if (!canonicalParentTask) throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);\n  }\n  return revision.content;\n}''')
+
+          once(path,
+          '''  const threadId = typeof metadata.thread_id === "string" ? metadata.thread_id.trim() : "";\n  const parentThreadId = typeof metadata.parent_thread_id === "string" ? metadata.parent_thread_id.trim() : "";\n  const agentName = typeof metadata.agent_name === "string" ? metadata.agent_name.trim() : "";\n  if (!threadId || !parentThreadId || threadId === parentThreadId || !/^\\/root\\/.+/.test(agentName)) return undefined;''',
+          '''  const threadId = typeof metadata.thread_id === "string" ? metadata.thread_id.trim() : "";\n  const turnId = typeof metadata.turn_id === "string" ? metadata.turn_id.trim() : "";\n  const parentThreadId = typeof metadata.parent_thread_id === "string" ? metadata.parent_thread_id.trim() : "";\n  const parentTurnId = typeof metadata.parent_turn_id === "string" ? metadata.parent_turn_id.trim() : "";\n  const agentName = typeof metadata.agent_name === "string" ? metadata.agent_name.trim() : "";\n  if (!threadId || !turnId || !parentThreadId || !parentTurnId\n    || threadId === parentThreadId || turnId === parentTurnId || !/^\\/root\\/.+/.test(agentName)) return undefined;''')
+
+          once(path,
+          '''  return { threadId, parentThreadId, agentName, sandboxType, workspaceRoots };''',
+          '''  return { threadId, parentThreadId, parentTurnId, agentName, sandboxType, workspaceRoots };''')
+
+          path = "tests/environment.test.ts"
+          once(path,
+          '''import { extractChatGptTurnEnvironment } from "../src/adapters/chatgpt-web/environment";''',
+          '''import {\n  extractChatGptTurnEnvironment,\n  extractChatGptTurnUserRevision,\n} from "../src/adapters/chatgpt-web/environment";''')
+
+          # Existing trusted-lineage fixtures now prove the parent turn as well as the parent thread.
+          p = Path(path)
+          text = p.read_text()
+          text = text.replace('''          parent_thread_id: "thread_current",\n          agent_name: "/root/read_package_version",''', '''          parent_thread_id: "thread_current",\n          parent_turn_id: "turn_current",\n          agent_name: "/root/read_package_version",''', 1)
+          text = text.replace('''      parent_thread_id: "thread_current",\n      agent_name: "/root/nongit_child",''', '''      parent_thread_id: "thread_current",\n      parent_turn_id: "turn_current",\n      agent_name: "/root/nongit_child",''', 1)
+          text = text.replace('''      parent_thread_id: "thread_current",\n      agent_name: "/root/child",''', '''      parent_thread_id: "thread_current",\n      parent_turn_id: "turn_current",\n      agent_name: "/root/child",''', 1)
+          p.write_text(text)
+
+          marker = '''describe("trusted current Codex environment envelope", () => {'''
+          tests = r'''describe("native subagent user revision lineage", () => {
+  function spawnedChildRevision(parentTurnId = "turn_parent", messageTurnId = parentTurnId, subagentKind = "thread_spawn") {
+    const request = currentWire();
+    request._rawBody = {
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({
+          request_kind: "turn",
+          thread_id: "thread_child",
+          turn_id: "turn_child",
+          parent_thread_id: "thread_parent",
+          parent_turn_id: parentTurnId,
+          agent_name: "/root/subagent_test",
+          subagent_kind: subagentKind,
+          sandbox_mode: "danger-full-access",
+          workspaces: { [root]: { has_changes: false } },
+        }),
+      },
+      input: [{
+        type: "message",
+        id: "msg_child_task",
+        role: "user",
+        content: [{ type: "input_text", text: "Solve the delegated task" }],
+        internal_chat_message_metadata_passthrough: { turn_id: messageTurnId },
+      }],
+    };
+    return request;
+  }
+
+  test("accepts a canonical child task whose message is stamped with its authenticated parent turn", () => {
+    expect(extractChatGptTurnUserRevision(spawnedChildRevision())).toEqual([
+      { type: "input_text", text: "Solve the delegated task" },
+    ]);
+  });
+
+  test("rejects a child task stamped with a turn other than its authenticated parent", () => {
+    expect(() => extractChatGptTurnUserRevision(spawnedChildRevision("turn_parent", "turn_other")))
+      .toThrow("current user message conflicts with native Codex turn_id metadata");
+  });
+
+  test("does not relax turn ownership for a forged non-thread-spawn request", () => {
+    expect(() => extractChatGptTurnUserRevision(spawnedChildRevision("turn_parent", "turn_parent", "other")))
+      .toThrow("current user message conflicts with native Codex turn_id metadata");
+  });
+});
+
+'''
+          once(path, marker, tests + marker)
+          PY
+          git diff --check
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile
+          (cd launcher && bun install --frozen-lockfile)
+      - name: Validate exact patched tree
+        run: |
+          bun run check-version
+          bun run typecheck
+          bun run test
+          bun run launcher:typecheck
+          bun run launcher:test
+          bun run launcher:build
+          bun run build
+          bun run smoke
+      - name: Commit validated implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -f .github/workflows/temporary-subagent-lineage-fix.yml
+          if [ -f .github/workflows/temporary-live-steer-final-gate.yml ]; then
+            git rm -f .github/workflows/temporary-live-steer-final-gate.yml
+          fi
+          git add src/adapters/chatgpt-web/environment.ts tests/environment.test.ts
+          git commit -m "Accept authenticated parent-turn lineage for Web subagents"
+          git push origin HEAD:fix/subagent-parent-turn-lineage
