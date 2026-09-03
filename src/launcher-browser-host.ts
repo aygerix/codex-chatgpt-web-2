@@ -273,7 +273,7 @@ export async function inspectLauncherBrowserHost(
     });
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : `HTTP ${response.status}`);
-    if (body.authenticated !== true || body.regular !== true || typeof body.url !== "string") {
+    if (body.authenticated !== true || body.temporary !== true || typeof body.url !== "string") {
       throw new Error("Launcher returned invalid ChatGPT session evidence");
     }
     if (options.detectCapabilities
@@ -436,6 +436,42 @@ export async function handoffLauncherTurnForSteering(
     }
   } catch (error) {
     throw new Error(`Launcher steering handoff failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export const LAUNCHER_LIVE_STEER_TIMEOUT_MS = 15_000;
+
+export async function steerLauncherTurn(
+  descriptorPath: string,
+  input: { traceId: string; logId: number; text: string },
+  timeoutMs = LAUNCHER_LIVE_STEER_TIMEOUT_MS,
+): Promise<{ revision: number; duplicate: boolean }> {
+  if (!/^[A-Za-z0-9_-]{6,128}$/.test(input.traceId)) throw new Error("Launcher steer trace id is invalid");
+  if (!Number.isSafeInteger(input.logId) || input.logId < 1) throw new Error("Launcher steer log id is invalid");
+  if (typeof input.text !== "string" || !input.text.trim()) throw new Error("Launcher steer text is empty");
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${descriptor.control.endpoint}/v1/turn/steer`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${descriptor.control.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(input),
+      signal: controller.signal,
+    });
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (!response.ok || !Number.isSafeInteger(body.revision) || typeof body.duplicate !== "boolean") {
+      const detail = typeof body.error === "string" ? `: ${body.error}` : "";
+      throw new Error(`HTTP ${response.status}${detail}`);
+    }
+    return { revision: Number(body.revision), duplicate: body.duplicate };
+  } catch (error) {
+    throw new Error(`Launcher live steering failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     clearTimeout(timer);
   }

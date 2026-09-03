@@ -244,10 +244,10 @@ test("launcher session verification uses the authenticated control channel inste
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
       authenticated: true,
-      regular: true,
+      temporary: true,
       solAvailable: true,
       proAvailable: true,
-      url: "https://chatgpt.com/",
+      url: "https://chatgpt.com/?temporary-chat=true",
     }));
   });
   await new Promise<void>((resolve, reject) => {
@@ -261,7 +261,7 @@ test("launcher session verification uses the authenticated control channel inste
     expect(await inspectLauncherBrowserHost(path, { detectCapabilities: true })).toEqual({
       solAvailable: true,
       proAvailable: true,
-      url: "https://chatgpt.com/",
+      url: "https://chatgpt.com/?temporary-chat=true",
     });
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));

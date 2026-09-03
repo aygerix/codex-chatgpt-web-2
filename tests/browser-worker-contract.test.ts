@@ -87,6 +87,9 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   expect(prepareTemporaryChatSurface).toContain("await assertTemporaryChatPage(page)");
   expect(prepareTemporaryChatSurface).toContain("await ensureChatGptPersonalizedConnectorAccess(page, captureDiagnostic)");
   expect(prepareTemporaryChatSurface).toContain('await captureDiagnostic?.("personalization-verified")');
+  expect(workerSource).toContain("__CODEX_WEB_GPT_STEER_REVISION__");
+  expect(workerSource).toContain("waitForSteeredAssistantTurn");
+  expect(workerSource).toContain("completionSteerRevision > handledSteerRevision");
 });
 
 test("conversation turn identity survives ChatGPT DOM virtualization", () => {

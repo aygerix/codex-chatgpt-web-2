@@ -180,10 +180,10 @@ test("DEV browser-only setup persists only the isolated harness profile", async 
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
       authenticated: true,
-      regular: true,
+      temporary: true,
       solAvailable: true,
       proAvailable: false,
-      url: "https://chatgpt.com/",
+      url: "https://chatgpt.com/?temporary-chat=true",
     }));
   });
   await new Promise<void>((resolveListen, rejectListen) => {

@@ -2408,6 +2408,63 @@ export class ChatGptBrowserWorker {
     return await this.activeComposer(page);
   }
 
+  private async readCodexSteerRevision(page: Page): Promise<number> {
+    return await page.evaluate(() => {
+      const value = (globalThis as typeof globalThis & { __CODEX_WEB_GPT_STEER_REVISION__?: unknown })
+        .__CODEX_WEB_GPT_STEER_REVISION__;
+      return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+    }).catch(() => 0);
+  }
+
+  private async waitForSteeredAssistantTurn(
+    page: Page,
+    knownResponseIdentities: ReadonlySet<string>,
+    deadline: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<{
+    binding: ChatGptAssistantTurnBinding;
+    baseline: ChatGptSubmissionBaseline;
+    state: ChatGptSubmissionDomState;
+  }> {
+    const responseDeadline = Math.min(
+      deadline ?? Number.POSITIVE_INFINITY,
+      Date.now() + CHATGPT_RESPONSE_DOM_GRACE_MS,
+    );
+    for (;;) {
+      if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      if (page.isClosed()) throw chatGptBrowserTabClosedError();
+      if (deadline !== undefined && Date.now() >= deadline) throw new Error("ChatGPT web turn timed out");
+      if (Date.now() >= responseDeadline) {
+        throw new Error("ChatGPT accepted Codex steering but did not expose its steered assistant turn in the DOM");
+      }
+      const state = await this.submissionDomState(page, undefined, signal);
+      const newResponses = state.responseIdentities.filter(identity => !knownResponseIdentities.has(identity));
+      if (newResponses.length > 0) {
+        const identity = newResponses.at(-1)!;
+        const initialResponseTurnIdentities = state.responseIdentities.filter(candidate => candidate !== identity);
+        const baseline: ChatGptSubmissionBaseline = {
+          userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
+          responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
+          initialUserTurnCount: Math.max(0, state.userTurnCount - 1),
+          initialResponseTurnCount: Math.max(0, state.assistantTurnCount - 1),
+          initialUserTurnIdentities: state.userIdentities.slice(0, -1),
+          initialResponseTurnIdentities,
+          domCache: {},
+        };
+        return {
+          state,
+          baseline,
+          binding: {
+            identity,
+            locator: page.locator(`[data-testid=${JSON.stringify(identity)}]`),
+            acceptedUserTurnIdentities: state.userIdentities,
+          },
+        };
+      }
+      await this.waitForTurnDomMutation(page, 50);
+    }
+  }
+
   private async waitForTurnDomMutation(page: Page, timeoutMs = 50): Promise<void> {
     await page.evaluate(({ timeout, attributeFilter }) => new Promise<void>(resolveMutation => {
       let settled = false;
@@ -4345,15 +4402,27 @@ export class ChatGptBrowserWorker {
       let sawRunning = false;
       let loggedCompletionWait = false;
       let capturedResponse = false;
-      const sentAt = Date.now();
-      const visibleTrace = new ChatGptVisibleTraceTracker();
-      const markdownBuffer = new ChatGptMarkdownBuffer();
-      const checkpointStream = turn.captureLunaCheckpoint
+      let sentAt = Date.now();
+      let visibleTrace = new ChatGptVisibleTraceTracker();
+      let markdownBuffer = new ChatGptMarkdownBuffer();
+      let checkpointStream = turn.captureLunaCheckpoint
         ? new ChatGptLunaCheckpointStream()
         : undefined;
+      const completedSteerAnswers: string[] = [];
+      let pendingSteerSeparator = false;
+      let handledSteerRevision = await this.readCodexSteerRevision(page);
+      let knownResponseIdentities = new Set<string>([
+        ...submissionBaseline.initialResponseTurnIdentities,
+        responseTurn.identity,
+      ]);
       const emitMarkdownDelta = (delta: string): void => {
         const visible = checkpointStream ? checkpointStream.push(delta) : delta;
-        if (visible) turn.onTextDelta(visible);
+        if (!visible) return;
+        if (pendingSteerSeparator) {
+          turn.onTextDelta("\n\n");
+          pendingSteerSeparator = false;
+        }
+        turn.onTextDelta(visible);
       };
       const throwMarkdownConsistencyError = (error: unknown): never => {
         if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
@@ -4364,9 +4433,45 @@ export class ChatGptBrowserWorker {
           retryable: false,
         });
       };
-      const domHealthTracker = new ChatGptTurnDomHealthTracker();
-      const stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
-      const responseDomCache: ChatGptResponseDomCache = {};
+      let domHealthTracker = new ChatGptTurnDomHealthTracker();
+      let stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
+      let responseDomCache: ChatGptResponseDomCache = {};
+      const applyCodexSteer = async (revision: number): Promise<void> => {
+        const prior = (() => {
+          try { return markdownBuffer.finish(); }
+          catch (error) { return throwMarkdownConsistencyError(error); }
+        })();
+        if (prior.delta) emitMarkdownDelta(prior.delta);
+        if (prior.markdown) {
+          completedSteerAnswers.push(prior.markdown);
+          pendingSteerSeparator = true;
+        }
+        const steered = await this.waitForSteeredAssistantTurn(
+          page,
+          knownResponseIdentities,
+          deadline,
+          turn.abortSignal,
+        );
+        responseTurn = steered.binding;
+        submissionBaseline = steered.baseline;
+        knownResponseIdentities = new Set(steered.state.responseIdentities);
+        handledSteerRevision = revision;
+        // Keep completionTracker intact so already-observed MCP activity cannot be acknowledged twice.
+        visibleTrace = new ChatGptVisibleTraceTracker();
+        markdownBuffer = new ChatGptMarkdownBuffer();
+        checkpointStream = turn.captureLunaCheckpoint ? new ChatGptLunaCheckpointStream() : undefined;
+        domHealthTracker = new ChatGptTurnDomHealthTracker();
+        stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
+        responseDomCache = {};
+        completionFenceRevision = undefined;
+        capturedResponse = false;
+        loggedCompletionWait = false;
+        sawRunning = false;
+        sentAt = Date.now();
+        consecutiveObservationRebinds = 0;
+        internalObservationFaults = 0;
+        await diagnostics.capture(page, `codex-steer-${revision}-accepted`);
+      };
       let consecutiveObservationRebinds = 0;
       let internalObservationFaults = 0;
       let observedThisIteration = false;
@@ -4392,6 +4497,11 @@ export class ChatGptBrowserWorker {
           throw new Error("ChatGPT web turn timed out");
         }
         await throwIfChatGptSessionFailureAlert(page);
+        const pendingSteerRevision = await this.readCodexSteerRevision(page);
+        if (pendingSteerRevision > handledSteerRevision) {
+          await applyCodexSteer(pendingSteerRevision);
+          continue;
+        }
         await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
 
         if (mode.localTools && await resolveChatGptToolConfirmation(
@@ -4524,6 +4634,11 @@ export class ChatGptBrowserWorker {
           });
           if (!completionReady) completionFenceRevision = undefined;
           if (completionReady) {
+            const completionSteerRevision = await this.readCodexSteerRevision(page);
+            if (completionSteerRevision > handledSteerRevision) {
+              await applyCodexSteer(completionSteerRevision);
+              continue;
+            }
             if (turn.completionFence) {
               if (completionFenceRevision === undefined) {
                 const revision = await turn.completionFence.begin();
@@ -4562,15 +4677,23 @@ export class ChatGptBrowserWorker {
               throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
             }
             if (final.delta) emitMarkdownDelta(final.delta);
+            let currentFinalText: string;
             if (checkpointStream) {
               const completed = checkpointStream.finishOptional(snapshot.visibleText);
-              if (completed.visibleRemainder) turn.onTextDelta(completed.visibleRemainder);
+              if (completed.visibleRemainder) {
+                if (pendingSteerSeparator) {
+                  turn.onTextDelta("\n\n");
+                  pendingSteerSeparator = false;
+                }
+                turn.onTextDelta(completed.visibleRemainder);
+              }
               if (completed.captured) turn.onLunaCheckpoint!(completed.captured);
               else console.warn(`[chatgpt-web] browser turn ${turn.traceId} completed without a Luna rolling checkpoint; preserving full native history`);
-              finalText = completed.answer;
+              currentFinalText = completed.answer;
             } else {
-              finalText = final.markdown;
+              currentFinalText = final.markdown;
             }
+            finalText = [...completedSteerAnswers, currentFinalText].filter(Boolean).join("\n\n");
             break;
           }
           if (!loggedCompletionWait && Date.now() - sentAt >= 30_000) {

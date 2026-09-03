@@ -2,7 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { extractChatGptTurnEnvironment } from "../src/adapters/chatgpt-web/environment";
+import {
+  extractChatGptTurnEnvironment,
+  extractChatGptTurnUserRevision,
+} from "../src/adapters/chatgpt-web/environment";
 import { ChatGptThreadEnvironmentStore } from "../src/adapters/chatgpt-web/thread-environment";
 import type { CodexParsedRequest, CodexTool } from "../src/types";
 
@@ -69,6 +72,51 @@ function currentWire(
     },
   };
 }
+
+describe("native subagent user revision lineage", () => {
+  function spawnedChildRevision(parentTurnId = "turn_parent", messageTurnId = parentTurnId, subagentKind = "thread_spawn") {
+    const request = currentWire();
+    request._rawBody = {
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({
+          request_kind: "turn",
+          thread_id: "thread_child",
+          turn_id: "turn_child",
+          parent_thread_id: "thread_parent",
+          parent_turn_id: parentTurnId,
+          agent_name: "/root/subagent_test",
+          subagent_kind: subagentKind,
+          sandbox_mode: "danger-full-access",
+          workspaces: { [root]: { has_changes: false } },
+        }),
+      },
+      input: [{
+        type: "message",
+        id: "msg_child_task",
+        role: "user",
+        content: [{ type: "input_text", text: "Solve the delegated task" }],
+        internal_chat_message_metadata_passthrough: { turn_id: messageTurnId },
+      }],
+    };
+    return request;
+  }
+
+  test("accepts a canonical child task whose message is stamped with its authenticated parent turn", () => {
+    expect(extractChatGptTurnUserRevision(spawnedChildRevision())).toEqual([
+      { type: "input_text", text: "Solve the delegated task" },
+    ]);
+  });
+
+  test("rejects a child task stamped with a turn other than its authenticated parent", () => {
+    expect(() => extractChatGptTurnUserRevision(spawnedChildRevision("turn_parent", "turn_other")))
+      .toThrow("current user message conflicts with native Codex turn_id metadata");
+  });
+
+  test("does not relax turn ownership for a forged non-thread-spawn request", () => {
+    expect(() => extractChatGptTurnUserRevision(spawnedChildRevision("turn_parent", "turn_parent", "other")))
+      .toThrow("current user message conflicts with native Codex turn_id metadata");
+  });
+});
 
 describe("trusted current Codex environment envelope", () => {
   test("accepts the v0.146 split envelope when workspace and sandbox metadata agree", () => {
@@ -502,6 +550,7 @@ describe("trusted Codex task environment continuity", () => {
           thread_id: "thread_child",
           turn_id: "turn_child",
           parent_thread_id: "thread_current",
+          parent_turn_id: "turn_current",
           agent_name: "/root/read_package_version",
           subagent_kind: "thread_spawn",
           sandbox_mode: "danger-full-access",
@@ -533,6 +582,7 @@ describe("trusted Codex task environment continuity", () => {
       thread_id: "thread_nongit_child",
       turn_id: "turn_nongit_child",
       parent_thread_id: "thread_current",
+      parent_turn_id: "turn_current",
       agent_name: "/root/nongit_child",
       subagent_kind: "thread_spawn",
       sandbox_mode: "danger-full-access",
@@ -549,6 +599,7 @@ describe("trusted Codex task environment continuity", () => {
       thread_id: "thread_child",
       turn_id: "turn_child",
       parent_thread_id: "thread_current",
+      parent_turn_id: "turn_current",
       agent_name: "/root/child",
       subagent_kind: "thread_spawn",
       sandbox_mode: "read-only",
