@@ -75,3 +75,11 @@ replace_once(
     '''    traceId: tab.traceId,\n    conversationKey: tab.conversationKey,''',
     "steering test request pid",
 )
+
+# DEV setup mocks the launcher inspection response; keep it aligned with regular-only session evidence.
+replace_once(
+    "tests/cli.test.ts",
+    '''      authenticated: true,\n      temporary: true,\n      solAvailable: true,\n      proAvailable: false,\n      url: "https://chatgpt.com/?temporary-chat=true",''',
+    '''      authenticated: true,\n      regular: true,\n      solAvailable: true,\n      proAvailable: false,\n      url: "https://chatgpt.com/",''',
+    "DEV regular-chat inspection fixture",
+)
