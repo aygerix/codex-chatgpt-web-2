@@ -2,8 +2,10 @@ const { createServer } = require("node:http");
 const { randomBytes, timingSafeEqual } = require("node:crypto");
 const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
 const { completeSteeringHandoff, requestSteeringHandoff } = require("./steering-handoff.cjs");
+const { steerRunningTurn } = require("./live-steering.cjs");
 
 const MAX_BODY_BYTES = 16 * 1024;
+const MAX_STEER_BODY_BYTES = 256 * 1024;
 
 function secureTokenMatches(expected, authorization) {
   const prefix = "Bearer ";
@@ -13,12 +15,12 @@ function secureTokenMatches(expected, authorization) {
   return supplied.length === wanted.length && timingSafeEqual(supplied, wanted);
 }
 
-async function readJson(request) {
+async function readJson(request, maxBytes = MAX_BODY_BYTES) {
   const chunks = [];
   let bytes = 0;
   for await (const chunk of request) {
     bytes += chunk.length;
-    if (bytes > MAX_BODY_BYTES) throw new Error("request body is too large");
+    if (bytes > maxBytes) throw new Error("request body is too large");
     chunks.push(chunk);
   }
   const text = Buffer.concat(chunks).toString("utf8");
@@ -96,6 +98,7 @@ class BrowserControlServer {
     const isTurn = request.url === "/v1/turn/start"
       || request.url === "/v1/turn/heartbeat"
       || request.url === "/v1/turn/handoff"
+      || request.url === "/v1/turn/steer"
       || request.url === "/v1/turn/end";
     const isTurnRelease = request.url === "/v1/turn/release";
     const isSessionInspect = request.url === "/v1/session/inspect";
@@ -104,7 +107,7 @@ class BrowserControlServer {
       return;
     }
     try {
-      const body = await readJson(request);
+      const body = await readJson(request, request.url === "/v1/turn/steer" ? MAX_STEER_BODY_BYTES : MAX_BODY_BYTES);
       const host = this.getBrowserHost();
       if (!host) throw new Error("browser host is not ready");
       if (isSessionInspect) {
@@ -125,6 +128,7 @@ class BrowserControlServer {
         throw new Error("traceId is invalid");
       }
       if (request.url !== "/v1/turn/handoff"
+        && request.url !== "/v1/turn/steer"
         && (!Number.isInteger(body.helperPid) || body.helperPid < 1)) {
         throw new Error("browser helper pid is invalid");
       }
@@ -160,6 +164,15 @@ class BrowserControlServer {
         throw new Error("refreshViewport is only valid for a turn heartbeat");
       }
       const preferences = this.getPreferences();
+      if (request.url === "/v1/turn/steer") {
+        const receipt = await steerRunningTurn(host, {
+          traceId: body.traceId,
+          logId: body.logId,
+          text: body.text,
+        });
+        writeJson(response, 200, { ok: true, ...receipt });
+        return;
+      }
       if (request.url === "/v1/turn/handoff") {
         if (body.conversationKey === undefined) throw new Error("steering handoff requires conversationKey");
         if (this.steeringHandoffs.has(body.traceId)) {

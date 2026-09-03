@@ -64,3 +64,12 @@ test("steering targets only the exact running browser tab and deduplicates a Cod
     /no browser tab owns/,
   );
 });
+
+
+test("launcher control server exposes the authenticated immediate steer route", () => {
+  const fs = require("node:fs");
+  const source = fs.readFileSync(require.resolve("../electron/control-server.cjs"), "utf8");
+  assert.match(source, /\/v1\/turn\/steer/);
+  assert.match(source, /steerRunningTurn\(host/);
+  assert.match(source, /MAX_STEER_BODY_BYTES/);
+});

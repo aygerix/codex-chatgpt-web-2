@@ -219,7 +219,8 @@ export class CodexSteeringLogWatcher {
   private timer?: ReturnType<typeof setInterval>;
   private polling = false;
   private readonly subscriptions = new Set<SteeringSubscription>();
-  private readonly subscribedAtSeconds = Math.floor(Date.now() / 1000);
+  private databaseExistedAtFirstSubscribe?: boolean;
+  private firstSubscribeAtSeconds?: number;
 
   constructor(
     private readonly databasePath = defaultCodexLogDatabasePath(),
@@ -236,6 +237,12 @@ export class CodexSteeringLogWatcher {
       ...input,
       tail: Promise.resolve(),
     };
+    if (this.databaseExistedAtFirstSubscribe === undefined) {
+      this.databaseExistedAtFirstSubscribe = existsSync(this.databasePath);
+      this.firstSubscribeAtSeconds = Math.floor(Date.now() / 1000);
+      // Establish the high-water mark synchronously before the user can click Steer.
+      if (this.databaseExistedAtFirstSubscribe) this.ensureDatabase();
+    }
     this.subscriptions.add(subscription);
     this.ensureTimer();
     void this.poll();
@@ -251,6 +258,8 @@ export class CodexSteeringLogWatcher {
     this.database?.close();
     this.database = undefined;
     this.cursor = undefined;
+    this.databaseExistedAtFirstSubscribe = undefined;
+    this.firstSubscribeAtSeconds = undefined;
   }
 
   async poll(): Promise<void> {
@@ -294,16 +303,15 @@ export class CodexSteeringLogWatcher {
       this.database = new Database(this.databasePath, { readonly: true, create: false });
       if (this.cursor === undefined) {
         const current = this.database.query("SELECT COALESCE(MAX(id), 0) AS max_id FROM logs").get() as { max_id?: number } | null;
-        // A normal production subscription starts after the log DB already exists: ignore history.
-        // If the DB appeared after subscription, retain rows from this subscription's start second
-        // so the first steer that created/opened it cannot be skipped.
-        const existedBeforeSubscribe = (current?.max_id ?? 0) > 0;
-        if (existedBeforeSubscribe) {
+        // If the DB existed when the first active Web turn subscribed, the synchronous
+        // subscribe-time open above establishes a strict high-water mark and ignores history. If
+        // the DB appeared later, retain rows from the subscription second so its first steer is not lost.
+        if (this.databaseExistedAtFirstSubscribe !== false) {
           this.cursor = current?.max_id ?? 0;
         } else {
           const prior = this.database.query(
             "SELECT COALESCE(MAX(id), 0) AS max_id FROM logs WHERE ts < ?",
-          ).get(this.subscribedAtSeconds) as { max_id?: number } | null;
+          ).get(this.firstSubscribeAtSeconds ?? Math.floor(Date.now() / 1000)) as { max_id?: number } | null;
           this.cursor = prior?.max_id ?? 0;
         }
       }

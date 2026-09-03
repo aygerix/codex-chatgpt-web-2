@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
-import { handoffLauncherTurnForSteering, releaseLauncherRetainedConversation } from "../../launcher-browser-host";
+import { handoffLauncherTurnForSteering, releaseLauncherRetainedConversation, steerLauncherTurn } from "../../launcher-browser-host";
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
-import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
+import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
@@ -37,6 +37,13 @@ import {
   retainedConversationResumeRequest,
   retainedConversationSteeringRequest,
 } from "./conversation-key";
+import {
+  codexSteeringLogWatcher,
+  codexUserRevisionText,
+  consumeInjectedCodexSteerReplay,
+  markInjectedCodexSteersSettled,
+  recordInjectedCodexSteer,
+} from "./codex-steering-watch";
 
 function brokerSocketPath(provider: CodexProviderConfig): string {
   const configured = provider.chatgptWeb?.brokerSocketPath?.trim();
@@ -359,6 +366,30 @@ export function createChatGptWebAdapter(
       onSendActivated: () => { submission.phase = "send_activated" as const; },
       onSubmitted: () => { submission.phase = "accepted" as const; },
     };
+    const armImmediateCodexSteering = (physicalSettlement: Promise<void>): void => {
+      if (parsed._compactionRequest
+        || !retainedLauncherDescriptor
+        || !identity.threadId
+        || !identity.turnId) return;
+      const threadId = identity.threadId;
+      const turnId = identity.turnId;
+      const unsubscribe = codexSteeringLogWatcher.subscribe({
+        threadId,
+        turnId,
+        onSteer: async submission => {
+          const receipt = await steerLauncherTurn(retainedLauncherDescriptor, {
+            traceId,
+            logId: submission.logId,
+            text: submission.text,
+          });
+          if (!receipt.duplicate) recordInjectedCodexSteer(submission);
+        },
+      });
+      void physicalSettlement.finally(() => {
+        unsubscribe();
+        markInjectedCodexSteersSettled(threadId, turnId);
+      });
+    };
     const steeringHandoffFor = (cancelBrowser: () => void): (() => Promise<string>) | undefined => (
       conversationKey && retainedLauncherDescriptor
         ? async () => {
@@ -417,6 +448,7 @@ export function createChatGptWebAdapter(
           onLunaCheckpoint: captureCheckpoint,
         } : {}),
       })), browserAbort);
+      armImmediateCodexSteering(browserTurn.physicalSettlement);
       return {
         mode: "read-only",
         browser: browserTurn.browser,
@@ -489,6 +521,7 @@ export function createChatGptWebAdapter(
         onLunaCheckpoint: captureCheckpoint,
       } : {}),
     })), browserAbort);
+    armImmediateCodexSteering(browserTurn.physicalSettlement);
     void browserTurn.browser.catch(error => {
       if (!tokenSettled) {
         tokenSettled = true;
@@ -532,6 +565,23 @@ export function createChatGptWebAdapter(
         const turnCapabilities = parsed._compactionRequest
           ? { ...configuredCapabilities, localToolsEnabled: false }
           : configuredCapabilities;
+        const immediateSteerIdentity = extractChatGptTurnIdentity(parsed);
+        if (!parsed._compactionRequest && immediateSteerIdentity.threadId && immediateSteerIdentity.turnId) {
+          const revisionText = codexUserRevisionText(extractChatGptTurnUserRevision(parsed));
+          if (revisionText && consumeInjectedCodexSteerReplay(
+            immediateSteerIdentity.threadId,
+            immediateSteerIdentity.turnId,
+            revisionText,
+          )) {
+            console.info(`[chatgpt-web] consumed canonical Codex replay for an already mirrored steer (textChars=${revisionText.length})`);
+            emitBrowserCompletion(
+              { type: "final", answer: "" },
+              estimateChatGptWebUsage(currentUsageInput(parsed), { answer: "", reasoning: [] }, turnCapabilities),
+              emit,
+            );
+            return;
+          }
+        }
         const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
         const structuredOutputValidator = parsed._compactionRequest
           ? undefined
