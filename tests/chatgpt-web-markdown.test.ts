@@ -99,7 +99,7 @@ test("final Markdown tolerates a pending source range that moves backward after 
   expect(buffer.finish().markdown).toBe("A\n\nB\n\nC");
 });
 
-test("duplicate pending source starts remain distinct Markdown candidates", () => {
+test("duplicate pending source starts remain distinct after the first duplicate commits", () => {
   const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0);
 
   expect(buffer.observe([
@@ -107,11 +107,13 @@ test("duplicate pending source starts remain distinct Markdown candidates", () =
     rangedParagraph("B", 20, 30, false),
   ], 0)).toBe("A");
 
-  expect(buffer.observe([
+  const duplicated = [
     rangedParagraph("A", 0, 10, true),
     rangedParagraph("B", 20, 30, true),
     rangedParagraph("C", 20, 40, false),
-  ], 1)).toBe("\n\nB");
+  ];
+  expect(buffer.observe(duplicated, 1)).toBe("\n\nB");
+  expect(buffer.observe(duplicated, 2)).toBe("");
 
   expect(buffer.currentSnapshotIsConsistent()).toBeTrue();
   expect(buffer.finish().markdown).toBe("A\n\nB\n\nC");
