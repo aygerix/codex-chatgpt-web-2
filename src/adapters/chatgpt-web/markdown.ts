@@ -217,14 +217,24 @@ export class ChatGptMarkdownBuffer {
       .map(segment => segment.sourceEnd)
       .filter((end): end is number => end !== undefined)
       .at(-1);
+    const sourceIdentityCounts = new Map<string, number>();
+    for (const segment of segments) {
+      const identity = this.sourceIdentity(segment);
+      if (identity) sourceIdentityCounts.set(identity, (sourceIdentityCounts.get(identity) ?? 0) + 1);
+    }
     let highestCommittedIndex = -1;
     let sawPending = false;
     let previousReliablePendingStart: number | undefined;
 
     for (const segment of segments) {
-      // First protect the append-only ledger. A source-range collision with a committed block still
-      // identifies that block even when the overall snapshot's ranges are overlapping or reset.
-      const committedIndex = this.committedIndex(segment);
+      const sourceIdentity = this.sourceIdentity(segment);
+      const sourceIdentityAmbiguous = sourceIdentity !== undefined
+        && (sourceIdentityCounts.get(sourceIdentity) ?? 0) > 1;
+
+      // First protect the append-only ledger. A unique source range still identifies a committed
+      // block authoritatively. If ChatGPT duplicated that range in this snapshot, use unique
+      // semantic identity instead so the second block cannot be mistaken for the first one.
+      const committedIndex = this.committedIndex(segment, !sourceIdentityAmbiguous);
       if (committedIndex !== undefined) {
         const committed = this.committed[committedIndex]!;
         if (sawPending || committedIndex < highestCommittedIndex || committed.text !== segment.text) {
@@ -241,6 +251,7 @@ export class ChatGptMarkdownBuffer {
         && previousReliablePendingStart !== undefined
         && segment.sourceStart <= previousReliablePendingStart;
       const sourceRangeReliable = segment.sourceStart !== undefined
+        && !sourceIdentityAmbiguous
         && !overlapsCommittedRange
         && !nonMonotonicPendingRange;
 
@@ -261,7 +272,9 @@ export class ChatGptMarkdownBuffer {
         : { ...segment, sourceStart: undefined, sourceEnd: undefined };
       if (!followsVisibleCommittedTail && !this.matchesLatestPending(alignmentSegment)) {
         return new ChatGptMarkdownConsistencyError(
-          "ChatGPT final DOM could not be aligned with text already streamed to Codex",
+          nonMonotonicPendingRange
+            ? "ChatGPT final DOM exposed non-monotonic source ranges"
+            : "ChatGPT final DOM could not be aligned with text already streamed to Codex",
         );
       }
       sawPending = true;
@@ -271,15 +284,26 @@ export class ChatGptMarkdownBuffer {
     return pending;
   }
 
-  private committedIndex(segment: ChatGptMarkdownSegment): number | undefined {
-    const exact = this.committed.findIndex(committed => (
-      segment.sourceStart !== undefined && committed.sourceStart !== undefined
-        ? segment.sourceStart === committed.sourceStart && segment.tag === committed.tag
-        : segment.key === committed.key
-    ));
-    if (exact >= 0) return exact;
+  private sourceIdentity(segment: ChatGptMarkdownSegment): string | undefined {
+    return segment.sourceStart !== undefined
+      ? `${segment.sourceStart}:${segment.tag ?? ""}`
+      : undefined;
+  }
 
-    if (segment.sourceStart !== undefined) return undefined;
+  private committedIndex(
+    segment: ChatGptMarkdownSegment,
+    sourceIdentityReliable = true,
+  ): number | undefined {
+    if (sourceIdentityReliable) {
+      const exact = this.committed.findIndex(committed => (
+        segment.sourceStart !== undefined && committed.sourceStart !== undefined
+          ? segment.sourceStart === committed.sourceStart && segment.tag === committed.tag
+          : segment.key === committed.key
+      ));
+      if (exact >= 0) return exact;
+      if (segment.sourceStart !== undefined) return undefined;
+    }
+
     if (!segment.tag) return undefined;
     const semanticMatches = this.committed
       .map((committed, index) => ({ committed, index }))
