@@ -1,7 +1,37 @@
 import type { Locator, Page } from "playwright-core";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 
-export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
+export type ChatGptChatSurface = "regular" | "temporary";
+
+export const CHATGPT_REGULAR_CHAT_URL = "https://chatgpt.com/";
+export const CHATGPT_ISOLATED_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
+
+export function resolveChatGptChatSurface(
+  value = process.env.CODEX_CHATGPT_WEB_CHAT_SURFACE,
+): ChatGptChatSurface {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "regular") return "regular";
+  if (normalized === "temporary") return "temporary";
+  throw new Error(
+    `Invalid CODEX_CHATGPT_WEB_CHAT_SURFACE=${JSON.stringify(value)}; expected "regular" or "temporary"`,
+  );
+}
+
+/**
+ * Regular history-backed chats are now the default. Set CODEX_CHATGPT_WEB_CHAT_SURFACE=temporary
+ * to retain the previous isolated Temporary Chat behavior.
+ */
+export const CHATGPT_CHAT_SURFACE = resolveChatGptChatSurface();
+export const CHATGPT_NEW_CHAT_URL = CHATGPT_CHAT_SURFACE === "temporary"
+  ? CHATGPT_ISOLATED_TEMPORARY_CHAT_URL
+  : CHATGPT_REGULAR_CHAT_URL;
+
+/**
+ * Backward-compatible worker navigation export. The browser worker historically imports this name,
+ * but it now resolves to whichever new-chat surface is selected above.
+ */
+export const CHATGPT_TEMPORARY_CHAT_URL = CHATGPT_NEW_CHAT_URL;
+
 export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
@@ -76,11 +106,26 @@ export async function assertAuthenticatedChatGptPage(page: Page): Promise<void> 
   }
 }
 
+/**
+ * Backward-compatible assertion used by the browser worker. It now verifies the selected new-chat
+ * surface: regular/history-backed by default, or isolated Temporary Chat when explicitly requested.
+ */
 export async function assertTemporaryChatPage(page: Page): Promise<void> {
   const url = new URL(page.url());
-  const expected = new URL(CHATGPT_TEMPORARY_CHAT_URL);
-  if (url.origin !== expected.origin || url.pathname !== expected.pathname || url.searchParams.get("temporary-chat") !== "true") {
-    throw new Error(`ChatGPT left the isolated Temporary Chat surface (${page.url()})`);
+  const expected = new URL(CHATGPT_NEW_CHAT_URL);
+  if (url.origin !== expected.origin) {
+    throw new Error(`ChatGPT left the selected ${CHATGPT_CHAT_SURFACE} chat surface (${page.url()})`);
+  }
+
+  if (CHATGPT_CHAT_SURFACE === "temporary") {
+    if (url.pathname !== expected.pathname || url.searchParams.get("temporary-chat") !== "true") {
+      throw new Error(`ChatGPT left the isolated Temporary Chat surface (${page.url()})`);
+    }
+    return;
+  }
+
+  if (url.searchParams.get("temporary-chat") === "true") {
+    throw new Error(`ChatGPT unexpectedly entered Temporary Chat while regular chats are selected (${page.url()})`);
   }
 }
 
