@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSession, ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -373,4 +373,35 @@ test("a different native turn never steals an active browser as steering", async
   )).resolves.toBeUndefined();
   expect(handoffs).toBe(0);
   sessions.clear();
+});
+
+
+test("accepted browser turn keeps its tool capability across observer failure until physical settlement", async () => {
+  let resolvePhysical!: () => void;
+  const physicalSettlement = new Promise<void>(resolve => { resolvePhysical = resolve; });
+  let revoked = 0;
+  const runtime = {
+    mode: "tools" as const,
+    browser: new Promise<string>(() => {}),
+    physicalSettlement,
+    trace: { drain: () => [], wait: async () => {} } as any,
+    text: { drain: () => [], value: () => "", wait: async () => {} } as any,
+    token: Promise.resolve("turn_token"),
+    externalProgress: {} as any,
+    retireCapability: async () => { revoked += 1; },
+    cancel: () => {},
+  };
+  const session = new ChatGptTurnSession(runtime as any, "trace", "owner");
+
+  await session.runExclusive(async () => {
+    throw new Error("observer disconnected");
+  }).catch(() => {});
+
+  await Promise.resolve();
+  expect(revoked).toBe(0);
+
+  resolvePhysical();
+  await physicalSettlement;
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(revoked).toBe(1);
 });
