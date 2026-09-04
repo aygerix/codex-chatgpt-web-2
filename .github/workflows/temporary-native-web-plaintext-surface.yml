@@ -18,7 +18,9 @@ jobs:
         with:
           bun-version-file: package.json
       - name: Patch native Web plaintext collaboration surface
-        run: python3 .github/scripts/patch-native-web-plaintext-surface.py
+        run: |
+          python3 .github/scripts/patch-native-web-plaintext-surface.py
+          python3 .github/scripts/refine-native-web-plaintext-surface.py
       - name: Install dependencies
         run: |
           bun install --frozen-lockfile
