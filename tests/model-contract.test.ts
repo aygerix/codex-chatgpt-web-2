@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
+import { CHATGPT_WEB_ASTRA_MODEL_ID, CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 
 test("the browser adapter maps fixed routed efforts to the visible ChatGPT modes", () => {
   const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
@@ -22,7 +22,16 @@ test("the browser adapter maps fixed routed efforts to the visible ChatGPT modes
   });
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", capabilities)).toMatchObject({
     uiEffortIndex: 4,
+    uiFamily: "GPT-5.6 Sol",
     localTools: true,
+  });
+  expect(resolveChatGptWebModelMode(CHATGPT_WEB_ASTRA_MODEL_ID, "low", capabilities)).toMatchObject({
+    uiEffortIndex: 0,
+    uiFamily: "Latest",
+  });
+  expect(resolveChatGptWebModelMode(CHATGPT_WEB_ASTRA_MODEL_ID, "max", capabilities)).toMatchObject({
+    uiEffortIndex: 4,
+    uiFamily: "Latest",
   });
 });
 
@@ -64,6 +73,7 @@ test("Luna-only capability binds the default model without a UI effort selector"
     effort: "low",
     displayLabel: "Luna",
     uiEffortIndex: null,
+    uiFamily: null,
     thinkEnabled: false,
     localTools: true,
   });
@@ -76,6 +86,7 @@ test("Luna-only capability binds the default model without a UI effort selector"
     effort: "medium",
     displayLabel: "Think",
     uiEffortIndex: null,
+    uiFamily: null,
     thinkEnabled: true,
     localTools: true,
   });

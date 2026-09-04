@@ -1,9 +1,11 @@
 export const CHATGPT_WEB_MODEL_PREFIX = "chatgpt-web/";
 export const CHATGPT_WEB_BACKEND_MODEL = "gpt-5.6-sol";
+export const CHATGPT_WEB_ASTRA_BACKEND_MODEL = "gpt-6-astra";
 export const CHATGPT_WEB_LUNA_BACKEND_MODEL = "gpt-5.6-luna";
 
 export type ChatGptWebBackendModel =
   | typeof CHATGPT_WEB_BACKEND_MODEL
+  | typeof CHATGPT_WEB_ASTRA_BACKEND_MODEL
   | typeof CHATGPT_WEB_LUNA_BACKEND_MODEL;
 
 export type ChatGptWebCodexEffort = "low" | "medium" | "high" | "xhigh" | "ultra";
@@ -150,6 +152,8 @@ export interface ChatGptWebModelRoute {
   codexEffort: ChatGptWebCodexEffort;
   adapterEffort: ChatGptWebAdapterEffort;
   requiresPro: boolean;
+  /** Exact model-family row selected in ChatGPT's nested model picker. */
+  uiFamily: "GPT-5.6 Sol" | "Latest" | null;
 }
 
 export interface ChatGptWebAccountCapabilities {
@@ -166,6 +170,7 @@ export const CHATGPT_WEB_LUNA_MODEL_ROUTE: ChatGptWebModelRoute = {
   codexEffort: "low",
   adapterEffort: "low",
   requiresPro: false,
+  uiFamily: null,
 };
 
 export const CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE: ChatGptWebModelRoute = {
@@ -178,6 +183,7 @@ export const CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE: ChatGptWebModelRoute = {
   // Think route after Codex has selected its separate catalog row.
   adapterEffort: "medium",
   requiresPro: false,
+  uiFamily: null,
 };
 
 export const CHATGPT_WEB_LUNA_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
@@ -191,52 +197,115 @@ export const CHATGPT_WEB_LUNA_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
  * effort. Pro uses Codex's `ultra` protocol value but binds explicitly to ChatGPT Pro (`max`) at
  * the adapter boundary.
  */
-export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
+export const CHATGPT_WEB_SOL_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
   {
     slug: "chatgpt-web/light",
-    displayName: "ChatGPT Web — Instant",
-    description: "ChatGPT Web Instant through the native Codex harness.",
+    displayName: "ChatGPT Web Sol — Light",
+    description: "ChatGPT Web GPT-5.6 Sol Light through the native Codex harness.",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "low",
     adapterEffort: "low",
     requiresPro: false,
+    uiFamily: "GPT-5.6 Sol",
   },
   {
     slug: "chatgpt-web/medium",
-    displayName: "ChatGPT Web — Medium",
-    description: "ChatGPT Web Medium through the native Codex harness.",
+    displayName: "ChatGPT Web Sol — Medium",
+    description: "ChatGPT Web GPT-5.6 Sol Medium through the native Codex harness.",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "medium",
     adapterEffort: "medium",
     requiresPro: false,
+    uiFamily: "GPT-5.6 Sol",
   },
   {
     slug: "chatgpt-web/high",
-    displayName: "ChatGPT Web — High",
-    description: "ChatGPT Web High through the native Codex harness.",
+    displayName: "ChatGPT Web Sol — High",
+    description: "ChatGPT Web GPT-5.6 Sol High through the native Codex harness.",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "high",
     adapterEffort: "high",
     requiresPro: false,
+    uiFamily: "GPT-5.6 Sol",
   },
   {
     slug: "chatgpt-web/extra-high",
-    displayName: "ChatGPT Web — Extra High",
-    description: "Account-gated ChatGPT Web Extra High through the native Codex harness.",
+    displayName: "ChatGPT Web Sol — Extra High",
+    description: "Account-gated ChatGPT Web GPT-5.6 Sol Extra High through the native Codex harness.",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "xhigh",
     adapterEffort: "xhigh",
     requiresPro: true,
+    uiFamily: "GPT-5.6 Sol",
   },
   {
     slug: "chatgpt-web/pro",
-    displayName: "ChatGPT Web — Pro",
-    description: "Account-gated ChatGPT Pro through the native Codex harness.",
+    displayName: "ChatGPT Web Sol — Pro",
+    description: "Account-gated ChatGPT Web GPT-5.6 Sol Pro through the native Codex harness.",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "ultra",
     adapterEffort: "max",
     requiresPro: true,
+    uiFamily: "GPT-5.6 Sol",
   },
+];
+
+export const CHATGPT_WEB_ASTRA_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
+  {
+    slug: "chatgpt-web/astra-light",
+    displayName: "ChatGPT Web Astra — Light",
+    description: "ChatGPT Web GPT-6 Astra Light through the native Codex harness.",
+    backendModel: CHATGPT_WEB_ASTRA_BACKEND_MODEL,
+    codexEffort: "low",
+    adapterEffort: "low",
+    requiresPro: true,
+    uiFamily: "Latest",
+  },
+  {
+    slug: "chatgpt-web/astra-medium",
+    displayName: "ChatGPT Web Astra — Medium",
+    description: "ChatGPT Web GPT-6 Astra Medium through the native Codex harness.",
+    backendModel: CHATGPT_WEB_ASTRA_BACKEND_MODEL,
+    codexEffort: "medium",
+    adapterEffort: "medium",
+    requiresPro: true,
+    uiFamily: "Latest",
+  },
+  {
+    slug: "chatgpt-web/astra-high",
+    displayName: "ChatGPT Web Astra — High",
+    description: "ChatGPT Web GPT-6 Astra High through the native Codex harness.",
+    backendModel: CHATGPT_WEB_ASTRA_BACKEND_MODEL,
+    codexEffort: "high",
+    adapterEffort: "high",
+    requiresPro: true,
+    uiFamily: "Latest",
+  },
+  {
+    slug: "chatgpt-web/astra-extra-high",
+    displayName: "ChatGPT Web Astra — Extra High",
+    description: "ChatGPT Web GPT-6 Astra Extra High through the native Codex harness.",
+    backendModel: CHATGPT_WEB_ASTRA_BACKEND_MODEL,
+    codexEffort: "xhigh",
+    adapterEffort: "xhigh",
+    requiresPro: true,
+    uiFamily: "Latest",
+  },
+  {
+    slug: "chatgpt-web/astra-pro",
+    displayName: "ChatGPT Web Astra — Pro",
+    description: "ChatGPT Web GPT-6 Astra Pro through the native Codex harness.",
+    backendModel: CHATGPT_WEB_ASTRA_BACKEND_MODEL,
+    codexEffort: "ultra",
+    adapterEffort: "max",
+    requiresPro: true,
+    uiFamily: "Latest",
+  },
+];
+
+export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
+  ...CHATGPT_WEB_SOL_MODEL_ROUTES,
+  ...CHATGPT_WEB_ASTRA_MODEL_ROUTES,
 ];
 
 const routesBySlug = new Map(
@@ -253,7 +322,7 @@ export function availableChatGptWebModelRoutes(
   if (!capabilities.solAvailable) return CHATGPT_WEB_LUNA_MODEL_ROUTES;
   return capabilities.proAvailable
     ? CHATGPT_WEB_MODEL_ROUTES
-    : CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro);
+    : CHATGPT_WEB_SOL_MODEL_ROUTES.filter(route => !route.requiresPro);
 }
 
 export function requireChatGptWebModelRoute(

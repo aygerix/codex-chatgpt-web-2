@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
-import { CHATGPT_WEB_LUNA_MODEL_ROUTE, CHATGPT_WEB_LUNA_MODEL_ROUTES, CHATGPT_WEB_MODEL_ROUTES, resolveChatGptWebContextLimits } from "../src/chatgpt-web-models";
+import { CHATGPT_WEB_LUNA_MODEL_ROUTE, CHATGPT_WEB_LUNA_MODEL_ROUTES, CHATGPT_WEB_MODEL_ROUTES, CHATGPT_WEB_SOL_MODEL_ROUTES, resolveChatGptWebContextLimits } from "../src/chatgpt-web-models";
 import { augmentNativeModelCatalog } from "../src/model-catalog";
 
 function source(): Record<string, unknown> {
@@ -65,15 +65,21 @@ describe("native /models augmentation", () => {
     const augmentedModels = augmented.models as Array<Record<string, unknown>>;
     const astra = augmentedModels.find(model => model.slug === "gpt-6-astra");
     const webPro = augmentedModels.find(model => model.slug === "chatgpt-web/pro");
+    const webAstraPro = augmentedModels.find(model => model.slug === "chatgpt-web/astra-pro");
 
     expect(native).toEqual(snapshot);
     expect(astra).toEqual((snapshot.models as Array<Record<string, unknown>>)[0]);
     expect(webPro).toMatchObject({
       base_instructions: "native harness",
       priority: 2,
-      supported_reasoning_levels: [{ effort: "ultra", description: "ChatGPT Web — Pro" }],
+      supported_reasoning_levels: [{ effort: "ultra", description: "ChatGPT Web Sol — Pro" }],
     });
     expect(webPro?.base_instructions).not.toBe("Astra-only instructions");
+    expect(webAstraPro).toMatchObject({
+      base_instructions: "Astra-only instructions",
+      priority: 1,
+      supported_reasoning_levels: [{ effort: "ultra", description: "ChatGPT Web Astra — Pro" }],
+    });
   });
 
   test("preserves every native model in order and appends one fixed model per ChatGPT Web mode", () => {
@@ -89,10 +95,10 @@ describe("native /models augmentation", () => {
     expect(native).toEqual(nativeSnapshot);
     expect(models.slice(0, 3)).toEqual(originalModels);
     const web = models.slice(3);
-    expect(web.map(model => model.slug)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug));
-    expect(web.map(model => model.display_name)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName));
+    expect(web.map(model => model.slug)).toEqual(CHATGPT_WEB_SOL_MODEL_ROUTES.map(route => route.slug));
+    expect(web.map(model => model.display_name)).toEqual(CHATGPT_WEB_SOL_MODEL_ROUTES.map(route => route.displayName));
     for (const [index, model] of web.entries()) {
-      const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
+      const route = CHATGPT_WEB_SOL_MODEL_ROUTES[index]!;
       const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
       expect(model).toMatchObject({
         slug: route.slug,
@@ -145,7 +151,7 @@ describe("native /models augmentation", () => {
 
     expect(spawnOverrides).toEqual([
       "gpt-5.6-sol",
-      ...CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug),
+      ...CHATGPT_WEB_SOL_MODEL_ROUTES.slice(1).map(route => route.slug),
     ]);
     expect(models.find(model => model.slug === "chatgpt-web/light")?.priority).toBe(3);
   });

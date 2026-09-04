@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
 import {
   availableChatGptWebModelRoutes,
+  CHATGPT_WEB_ASTRA_BACKEND_MODEL,
+  CHATGPT_WEB_ASTRA_MODEL_ROUTES,
   CHATGPT_WEB_BACKEND_MODEL,
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
   CHATGPT_WEB_LUNA_MODEL_ROUTE,
@@ -38,8 +40,15 @@ describe("fixed ChatGPT Web model routes", () => {
       ["chatgpt-web/high", "high", "high"],
       ["chatgpt-web/extra-high", "xhigh", "xhigh"],
       ["chatgpt-web/pro", "ultra", "max"],
+      ["chatgpt-web/astra-light", "low", "low"],
+      ["chatgpt-web/astra-medium", "medium", "medium"],
+      ["chatgpt-web/astra-high", "high", "high"],
+      ["chatgpt-web/astra-extra-high", "xhigh", "xhigh"],
+      ["chatgpt-web/astra-pro", "ultra", "max"],
     ]);
-    expect(CHATGPT_WEB_MODEL_ROUTES[0]?.displayName).toBe("ChatGPT Web — Instant");
+    expect(CHATGPT_WEB_MODEL_ROUTES[0]?.displayName).toBe("ChatGPT Web Sol — Light");
+    expect(CHATGPT_WEB_ASTRA_MODEL_ROUTES.map(route => route.backendModel))
+      .toEqual(Array(5).fill(CHATGPT_WEB_ASTRA_BACKEND_MODEL));
   });
 
   test("exposes only Plus-eligible routes without the Pro account capability", () => {
@@ -54,6 +63,8 @@ describe("fixed ChatGPT Web model routes", () => {
       .toThrow("Extra High is not available for this account");
     expect(() => requireChatGptWebModelRoute("chatgpt-web/pro", plus))
       .toThrow("Pro is not available for this account");
+    expect(() => requireChatGptWebModelRoute("chatgpt-web/astra-light", plus))
+      .toThrow("Astra — Light is not available for this account");
   });
 
   test("exposes Luna and Think when the authenticated account has no Sol selector", () => {
@@ -181,6 +192,17 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(request.options.reasoning).toBe("max");
     expect(() => routeChatGptWebRequest(parsed("chatgpt-web/not-enabled"), config))
       .toThrow("model is not enabled");
+  });
+
+  test("binds every Astra picker row to the GPT-6 browser family", () => {
+    const config = defaultConfig("full");
+    config.proAvailable = true;
+    for (const route of CHATGPT_WEB_ASTRA_MODEL_ROUTES) {
+      const request = parsed(route.slug, "low");
+      expect(routeChatGptWebRequest(request, config)).toBe(route);
+      expect(request.modelId).toBe(CHATGPT_WEB_ASTRA_BACKEND_MODEL);
+      expect(request.options.reasoning).toBe(route.adapterEffort);
+    }
   });
 
   test("keeps Pro compaction on the same retained Pro conversation", () => {

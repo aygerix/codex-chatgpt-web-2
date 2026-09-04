@@ -1597,6 +1597,9 @@ test("effort selection uses structural menu and slider indices instead of locali
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
   expect(workerSource).toContain("mode.uiEffortIndex");
+  expect(workerSource).toContain("mode.uiFamily");
+  expect(workerSource).toContain("CHATGPT_MODEL_PICKER_CONTENT_SELECTOR");
+  expect(workerSource).toContain('.filter({ hasText: mode.uiFamily })');
   expect(workerSource).toContain("CHATGPT_EFFORT_MENU_SELECTOR");
   expect(workerSource).toContain("CHATGPT_EFFORT_ITEM_SELECTOR");
   expect(workerSource).toContain('timeout: 70_000');

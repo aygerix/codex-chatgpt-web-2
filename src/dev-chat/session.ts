@@ -12,6 +12,11 @@ export const DEV_CHAT_MODELS = [
   "chatgpt-web/high",
   "chatgpt-web/extra-high",
   "chatgpt-web/pro",
+  "chatgpt-web/astra-light",
+  "chatgpt-web/astra-medium",
+  "chatgpt-web/astra-high",
+  "chatgpt-web/astra-extra-high",
+  "chatgpt-web/astra-pro",
 ] as const;
 
 export type DevChatModel = typeof DEV_CHAT_MODELS[number];

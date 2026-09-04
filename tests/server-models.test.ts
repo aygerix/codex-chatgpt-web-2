@@ -15,6 +15,18 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
     upstream = input;
     return Response.json({
       models: [{
+        slug: "gpt-6-astra",
+        display_name: "GPT-6-Astra",
+        priority: 1,
+        visibility: "list",
+        supported_in_api: true,
+        multi_agent_version: "v2",
+        supported_reasoning_levels: [],
+        tool_mode: "code_mode_only",
+        context_window: 1_050_000,
+        max_context_window: 1_050_000,
+        auto_compact_token_limit: 900_000,
+      }, {
         slug: "gpt-5.6-sol",
         display_name: "5.6 Sol",
         priority: 1,
@@ -48,18 +60,25 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
     }>;
   };
   expect(body.models.map(model => model.slug)).toEqual([
+    "gpt-6-astra",
     "gpt-5.6-sol",
     "chatgpt-web/light",
     "chatgpt-web/medium",
     "chatgpt-web/high",
     "chatgpt-web/extra-high",
     "chatgpt-web/pro",
+    "chatgpt-web/astra-light",
+    "chatgpt-web/astra-medium",
+    "chatgpt-web/astra-high",
+    "chatgpt-web/astra-extra-high",
+    "chatgpt-web/astra-pro",
   ]);
-  expect(body.models[0]!.context_window).toBe(300_000);
-  expect(body.models[0]!.max_context_window).toBe(371_851);
-  expect(body.models[0]!.auto_compact_token_limit).toBe(270_000);
-  expect(body.models[0]!.multi_agent_version).toBe("v2");
-  for (const [index, model] of body.models.slice(1).entries()) {
+  const nativeSol = body.models.find(model => model.slug === "gpt-5.6-sol")!;
+  expect(nativeSol.context_window).toBe(300_000);
+  expect(nativeSol.max_context_window).toBe(371_851);
+  expect(nativeSol.auto_compact_token_limit).toBe(270_000);
+  expect(nativeSol.multi_agent_version).toBe("v2");
+  for (const [index, model] of body.models.slice(2).entries()) {
     const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
     const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
     expect(model.context_window).toBe(limits.contextWindow);

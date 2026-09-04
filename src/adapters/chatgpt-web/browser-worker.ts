@@ -22,6 +22,7 @@ import {
   type ChatGptMarkdownSegment,
 } from "./markdown";
 import {
+  CHATGPT_WEB_ASTRA_MODEL_ID,
   CHATGPT_WEB_LUNA_MODEL_ID,
   CHATGPT_WEB_MODEL_ID,
   resolveChatGptWebModelMode,
@@ -52,6 +53,7 @@ import {
   CHATGPT_EFFORT_ITEM_SELECTOR,
   CHATGPT_EFFORT_MENU_SELECTOR,
   CHATGPT_EFFORT_SLIDER_SELECTOR,
+  CHATGPT_MODEL_PICKER_CONTENT_SELECTOR,
   CHATGPT_STOP_BUTTON_SELECTOR,
   CHATGPT_TEMPORARY_CHAT_URL,
   CHATGPT_USER_TURN_SELECTOR,
@@ -822,7 +824,9 @@ export function assertChatGptWebInputWithinLimits(
   capabilities: ChatGptWebCapabilities,
   promptChars?: number,
 ): void {
-  if (modelId !== CHATGPT_WEB_MODEL_ID && modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
+  if (modelId !== CHATGPT_WEB_MODEL_ID
+    && modelId !== CHATGPT_WEB_ASTRA_MODEL_ID
+    && modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new Error(`ChatGPT web context limit is not defined for model: ${modelId}`);
   }
   if (
@@ -885,7 +889,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
-  if (modelId !== CHATGPT_WEB_MODEL_ID) {
+  if (modelId !== CHATGPT_WEB_MODEL_ID && modelId !== CHATGPT_WEB_ASTRA_MODEL_ID) {
     throw new Error(`ChatGPT Bigger Context limit is not defined for model: ${modelId}`);
   }
   const { contextWindow } = resolveChatGptWebContextLimits(modelId, effort, capabilities);
@@ -952,7 +956,7 @@ export function resolveChatGptWebMultipartStagingMode(
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
-  if (modelId !== CHATGPT_WEB_MODEL_ID) {
+  if (modelId !== CHATGPT_WEB_MODEL_ID && modelId !== CHATGPT_WEB_ASTRA_MODEL_ID) {
     throw new Error(`ChatGPT Bigger Context staging mode is not defined for model: ${modelId}`);
   }
   const efforts: readonly ChatGptWebModelMode["effort"][] = capabilities.proAvailable
@@ -2286,6 +2290,49 @@ export class ChatGptBrowserWorker {
       );
     } finally {
       waitAbort.abort();
+    }
+    if (mode.uiFamily !== null) {
+      const familyMenu = page.locator(CHATGPT_MODEL_PICKER_CONTENT_SELECTOR).filter({ visible: true }).last();
+      await familyMenu.waitFor({ state: "visible", timeout: 10_000 });
+      // Raw semantic locators intentionally include the inactive side of the picker's animated
+      // two-panel track. Playwright role queries omit that inert panel, making the same control
+      // disappear depending on whether ChatGPT left the picker in simple or advanced view.
+      const familyToggle = familyMenu.locator('[role="menuitem"][aria-label="Select model"]');
+      const familyChoice = familyMenu.locator('[role="menuitemradio"]')
+        .filter({ hasText: mode.uiFamily });
+      if (await familyToggle.count() !== 1 || await familyChoice.count() !== 1) {
+        throw new ChatGptWebAdapterError(
+          `ChatGPT model picker does not expose the ${mode.uiFamily} family`,
+          { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: false },
+        );
+      }
+      let familySelected = await familyChoice.getAttribute("aria-checked");
+      if (familySelected !== "true" && familySelected !== "false") {
+        throw new Error(`ChatGPT ${mode.uiFamily} family has no semantic checked state`);
+      }
+      if (familySelected === "false") {
+        if (await familyToggle.getAttribute("aria-expanded") !== "true") {
+          // The nested family view uses the same background-Electron behavior as the outer picker.
+          // Activate its exact semantic row, then prove the requested radio item became selected.
+          await familyToggle.click({ force: true });
+        }
+        await familyChoice.waitFor({ state: "visible", timeout: 10_000 });
+        await familyChoice.click({ force: true });
+        const familyDeadline = Date.now() + 10_000;
+        do {
+          familySelected = await familyChoice.getAttribute("aria-checked");
+          if (familySelected === "true") break;
+          await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
+        } while (Date.now() < familyDeadline);
+        if (familySelected !== "true") {
+          throw new Error(`ChatGPT did not confirm the ${mode.uiFamily} model family`);
+        }
+        await captureDiagnostic?.(mode.uiFamily === "Latest" ? "astra-family-selected" : "sol-family-selected");
+      }
+      if (!await effortMenu.isVisible().catch(() => false)) {
+        await currentEffort.click({ force: true });
+      }
+      await effortSlider.waitFor({ state: "visible", timeout: 10_000 });
     }
     if (ready === "slider") {
       let sliderState = parseChatGptEffortSliderState(

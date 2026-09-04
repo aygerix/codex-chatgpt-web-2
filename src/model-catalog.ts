@@ -2,8 +2,7 @@ import type { AppConfig } from "./config";
 import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebModelRoutes,
-  CHATGPT_WEB_BACKEND_MODEL,
-  CHATGPT_WEB_LUNA_BACKEND_MODEL,
+  CHATGPT_WEB_ASTRA_BACKEND_MODEL,
   CHATGPT_WEB_MODEL_PREFIX,
   resolveChatGptWebContextLimits,
   type ChatGptWebModelRoute,
@@ -73,7 +72,11 @@ function nativeTemplateCandidate(value: unknown, requireTools: boolean): value i
   return !requireTools || (typeof model.tool_mode === "string" && model.tool_mode.length > 0);
 }
 
-function selectNativeTemplate(models: unknown[], config: AppConfig): JsonObject {
+function selectNativeTemplate(
+  models: unknown[],
+  config: AppConfig,
+  backendModel: ChatGptWebModelRoute["backendModel"],
+): JsonObject {
   const requireTools = config.mode === "full";
   const candidates = models.filter(model => nativeTemplateCandidate(model, requireTools)) as JsonObject[];
   // The native catalog is ordered by product priority. A newly launched model can therefore move
@@ -81,9 +84,6 @@ function selectNativeTemplate(models: unknown[], config: AppConfig): JsonObject 
   // ChatGPT Web route based on the native row for the model that the browser adapter actually
   // drives; otherwise a catalog launch can silently copy another model's instructions, tool mode,
   // collaboration protocol, and ordering onto the Web aliases.
-  const backendModel = config.solAvailable
-    ? CHATGPT_WEB_BACKEND_MODEL
-    : CHATGPT_WEB_LUNA_BACKEND_MODEL;
   const template = candidates.find(model => slug(model) === backendModel) ?? candidates[0];
   if (template) return template;
   throw new Error(
@@ -179,7 +179,6 @@ export function augmentNativeModelCatalog(
       }
     }
   }
-  const template = selectNativeTemplate(nativeModels, config);
   if (contextOverride) {
     // model_context_window is a single top-level Codex setting, not a per-model one. Apply its
     // advertised maximum to every native row so switching native models cannot silently clamp the
@@ -198,8 +197,17 @@ export function augmentNativeModelCatalog(
       }
     }
   }
+  // Astra Web aliases are meaningful only when the authenticated native catalog also exposes the
+  // GPT-6 Astra family. This keeps staged account rollouts from publishing unusable picker rows.
+  const nativeSlugs = new Set(nativeModels.map(slug).filter((value): value is string => Boolean(value)));
   const webModels = availableChatGptWebModelRoutes(config)
-    .map(route => buildChatGptWebModel(template, route, config));
+    .filter(route => route.backendModel !== CHATGPT_WEB_ASTRA_BACKEND_MODEL
+      || nativeSlugs.has(CHATGPT_WEB_ASTRA_BACKEND_MODEL))
+    .map(route => buildChatGptWebModel(
+      selectNativeTemplate(nativeModels, config, route.backendModel),
+      route,
+      config,
+    ));
   return {
     ...structuredClone(catalog),
     models: [...nativeModels, ...webModels],
