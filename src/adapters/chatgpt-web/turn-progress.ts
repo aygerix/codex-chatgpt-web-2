@@ -5,8 +5,16 @@ export interface ChatGptExternalTurnProgressSnapshot {
   lastProgressAt?: number;
 }
 
-/** Allows one bounded DOM probe plus cross-process delivery before failing the causal barrier. */
-export const CHATGPT_TOOL_BOUNDARY_OBSERVATION_TIMEOUT_MS = 10_000;
+/**
+ * Causal barrier timeout for the browser to acknowledge a pre-tool answer boundary.
+ *
+ * The browser worker may legitimately consume up to three 5s DOM observation windows while
+ * recovering the exact launcher-owned page (initial probe plus two same-page rebinds). The barrier
+ * must outlive that bounded recovery envelope or it can kill a healthy accepted turn before the
+ * worker has exhausted its own recovery policy. Keep additional headroom for the helper-process
+ * progress frame, rebind handshake, and acknowledgement round-trip.
+ */
+export const CHATGPT_TOOL_BOUNDARY_OBSERVATION_TIMEOUT_MS = 30_000;
 
 interface ProgressWaiter {
   afterRevision: number;
