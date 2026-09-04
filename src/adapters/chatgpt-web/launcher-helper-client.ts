@@ -11,6 +11,12 @@ import {
   type ChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
 
+const MAX_HELPER_DIAGNOSTIC_LINES = 48;
+const MAX_HELPER_LIFECYCLE_ENTRIES = 96;
+const MAX_HELPER_DIAGNOSTIC_LINE_CHARS = 2_000;
+const HELPER_FAILURE_DIAGNOSTIC_LINES = 20;
+const HELPER_FAILURE_LIFECYCLE_ENTRIES = 32;
+
 interface PendingTurn {
   turn: BrowserTurn;
   resolve: (value: string) => void;
@@ -178,8 +184,59 @@ export class LauncherBrowserHelperClient {
   private readyReject?: (error: Error) => void;
   private readonly pending = new Map<string, PendingTurn>();
   private helperFeatures = new Set<string>();
+  private helperDiagnosticTail: string[] = [];
+  private helperLifecycleTail: string[] = [];
 
   constructor(private readonly config: ResolvedBrowserConfig) {}
+
+  private recordHelperDiagnostic(line: string): void {
+    const bounded = line.replace(/\r/g, "").slice(0, MAX_HELPER_DIAGNOSTIC_LINE_CHARS);
+    if (!bounded) return;
+    this.helperDiagnosticTail.push(bounded);
+    if (this.helperDiagnosticTail.length > MAX_HELPER_DIAGNOSTIC_LINES) {
+      this.helperDiagnosticTail.splice(0, this.helperDiagnosticTail.length - MAX_HELPER_DIAGNOSTIC_LINES);
+    }
+  }
+
+  private recordHelperLifecycle(event: string): void {
+    this.helperLifecycleTail.push(`${new Date().toISOString()} ${event}`);
+    if (this.helperLifecycleTail.length > MAX_HELPER_LIFECYCLE_ENTRIES) {
+      this.helperLifecycleTail.splice(0, this.helperLifecycleTail.length - MAX_HELPER_LIFECYCLE_ENTRIES);
+    }
+  }
+
+  private recordHelperMessage(message: HelperMessage): void {
+    if (message.type === "ready") {
+      this.recordHelperLifecycle(`rx ready features=${(message.features ?? []).join(",") || "none"}`);
+      return;
+    }
+    if (message.type === "event") {
+      const revision = "revision" in message ? ` revision=${message.revision}` : "";
+      const requestId = "requestId" in message ? ` requestId=${message.requestId}` : "";
+      this.recordHelperLifecycle(`rx event=${message.event} id=${message.id}${revision}${requestId}`);
+      return;
+    }
+    if (message.type === "error") {
+      this.recordHelperLifecycle(
+        `rx error id=${message.id} name=${message.name ?? "Error"} code=${message.code ?? "none"}`,
+      );
+      return;
+    }
+    this.recordHelperLifecycle(`rx result id=${message.id}`);
+  }
+
+  private helperFailureWithContext(error: Error): Error {
+    const diagnostics = this.helperDiagnosticTail.slice(-HELPER_FAILURE_DIAGNOSTIC_LINES);
+    const lifecycle = this.helperLifecycleTail.slice(-HELPER_FAILURE_LIFECYCLE_ENTRIES);
+    const sections = [error.message];
+    if (diagnostics.length > 0) {
+      sections.push(`helper stderr tail:\n${diagnostics.map(line => `  ${line}`).join("\n")}`);
+    }
+    if (lifecycle.length > 0) {
+      sections.push(`helper lifecycle tail:\n${lifecycle.map(line => `  ${line}`).join("\n")}`);
+    }
+    return new Error(sections.join("\n"), { cause: error });
+  }
 
   /**
    * The helper that shipped with this daemon, when one sits beside its own entrypoint.
@@ -306,6 +363,8 @@ export class LauncherBrowserHelperClient {
       return this.ready;
     }
     const descriptor = readLauncherBrowserHostDescriptor(this.config.browserHostDescriptorPath!);
+    this.helperDiagnosticTail = [];
+    this.helperLifecycleTail = [];
     const child = spawn(
       descriptor.helper.executable,
       [this.config.browserHelperScriptPath ?? this.bundledHelperScript() ?? descriptor.helper.script],
@@ -320,6 +379,7 @@ export class LauncherBrowserHelperClient {
       },
     );
     this.child = child;
+    this.recordHelperLifecycle(`spawn pid=${child.pid ?? "unknown"}`);
     this.ready = new Promise<void>((resolveReady, rejectReady) => {
       this.readyResolve = resolveReady;
       this.readyReject = rejectReady;
@@ -327,7 +387,10 @@ export class LauncherBrowserHelperClient {
     const output = createInterface({ input: child.stdout });
     output.on("line", line => this.handleLine(child, line));
     const errors = createInterface({ input: child.stderr });
-    errors.on("line", line => console.info(`[chatgpt-web-helper] ${line}`));
+    errors.on("line", line => {
+      this.recordHelperDiagnostic(line);
+      console.info(`[chatgpt-web-helper] ${line}`);
+    });
     const failChild = (error: Error) => {
       const owned = this.child === child;
       this.handleExit(child, error);
@@ -383,6 +446,7 @@ export class LauncherBrowserHelperClient {
       });
       return;
     }
+    this.recordHelperMessage(message);
     if (message.type === "ready") {
       // An older helper advertises nothing and must never be sent optional frames: it would route
       // them to its run handler and destroy the turn with an opaque TypeError.
@@ -608,7 +672,10 @@ export class LauncherBrowserHelperClient {
 
   private handleExit(child: ChildProcessWithoutNullStreams, error: Error): void {
     if (this.child !== child) return;
-    this.readyReject?.(error);
+    this.recordHelperLifecycle(`exit pid=${child.pid ?? "unknown"} code=${child.exitCode ?? "none"} signal=${child.signalCode ?? "none"}`);
+    const contextualError = this.helperFailureWithContext(error);
+    console.error(`[chatgpt-web-helper] ${contextualError.message}`);
+    this.readyReject?.(contextualError);
     this.readyReject = undefined;
     this.readyResolve = undefined;
     this.ready = undefined;
@@ -623,12 +690,20 @@ export class LauncherBrowserHelperClient {
         status: "failed",
         message: "Launcher browser helper exited before completing the turn",
       }).then(
-        () => this.finishWithError(id, pending.localFailure ?? error),
+        () => this.finishWithError(
+          id,
+          pending.localFailure
+            ? new Error(`${pending.localFailure.message}\n${contextualError.message}`, { cause: pending.localFailure })
+            : contextualError,
+        ),
         controlError => this.finishWithError(
           id,
           new AggregateError(
-            [pending.localFailure ?? error, controlError instanceof Error ? controlError : new Error(String(controlError))],
-            `Launcher browser helper exited and failed to release turn ${id}`,
+            [
+              pending.localFailure ?? contextualError,
+              controlError instanceof Error ? controlError : new Error(String(controlError)),
+            ],
+            `Launcher browser helper exited and failed to release turn ${id}: ${contextualError.message}`,
           ),
         ),
       );
@@ -682,6 +757,12 @@ export class LauncherBrowserHelperClient {
   }
 
   private async sendTo(child: ChildProcessWithoutNullStreams, message: unknown): Promise<void> {
+    if (message && typeof message === "object" && !Array.isArray(message)) {
+      const frame = message as Record<string, unknown>;
+      const type = typeof frame.type === "string" ? frame.type : "unknown";
+      const id = typeof frame.id === "string" ? frame.id : undefined;
+      this.recordHelperLifecycle(`tx type=${type}${id ? ` id=${id}` : ""}`);
+    }
     const encoded = `${JSON.stringify(message)}\n`;
     if (child.stdin.destroyed || child.stdin.writableEnded) {
       throw new Error("Launcher browser helper input is closed");
