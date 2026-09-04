@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { SUMMARY_PREFIX } from "../../responses/compaction";
 import type { CodexParsedRequest } from "../../types";
-import { extractChatGptTurnIdentity } from "./environment";
+import { extractChatGptCompactionSourceRevision, extractChatGptTurnIdentity } from "./environment";
 
 function messageText(item: Record<string, unknown>): string | undefined {
   const content = item.content;
@@ -29,17 +29,34 @@ function compactionEpoch(input: unknown[] | undefined): unknown {
 export function chatGptConversationKey(
   parsed: CodexParsedRequest,
   namespace: string,
+  options: { turnScoped?: boolean; turnId?: string } = {},
 ): string | undefined {
   const identity = extractChatGptTurnIdentity(parsed);
   if (!identity.threadId) return undefined;
+  const scopedTurnId = options.turnScoped ? options.turnId ?? identity.turnId : undefined;
+  if (options.turnScoped && !scopedTurnId) return undefined;
   const raw = parsed._rawBody as { input?: unknown[] } | undefined;
   return createHash("sha256").update(JSON.stringify({
     namespace,
     threadId: identity.threadId,
+    ...(scopedTurnId ? { turnId: scopedTurnId } : {}),
     modelId: parsed.modelId,
     reasoning: parsed.options.reasoning,
     compaction: compactionEpoch(raw?.input),
   })).digest("hex");
+}
+
+/** Locate the retained Full-mode browser epoch owned by the pre-compaction native turn. */
+export function chatGptCompactionSourceConversationKey(
+  parsed: CodexParsedRequest,
+  namespace: string,
+): string | undefined {
+  const identity = extractChatGptTurnIdentity(parsed);
+  const source = extractChatGptCompactionSourceRevision(parsed);
+  return chatGptConversationKey(parsed, namespace, {
+    turnScoped: true,
+    turnId: source.turnId ?? identity.turnId,
+  });
 }
 
 /** A live Codex steering revision reuses the browser conversation and sends only the new instruction. */

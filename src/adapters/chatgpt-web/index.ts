@@ -33,6 +33,7 @@ import {
   settleActiveCompactionSource,
 } from "./compaction-handoff";
 import {
+  chatGptCompactionSourceConversationKey,
   chatGptConversationKey,
   retainedConversationResumeRequest,
   retainedConversationSteeringRequest,
@@ -306,7 +307,13 @@ export function createChatGptWebAdapter(
       : { parsed, applied: false };
     const conversationKey = !parsed._compactionRequest
       && retainedLauncherDescriptor
-      ? chatGptConversationKey(checkpointInput.parsed, executionNamespace)
+      ? chatGptConversationKey(checkpointInput.parsed, executionNamespace, {
+        // Codex goals are thread-scoped, but Native2 capabilities are turn-scoped. Never retain a
+        // tool-capable ChatGPT conversation across native turns: its visible transcript can still
+        // contain the previous turn's retired token. Steering within one native turn keeps the same
+        // turnId and therefore the same browser conversation/capability epoch.
+        turnScoped: mode.localTools,
+      })
       : undefined;
     if (steeringConversationKey && steeringConversationKey !== conversationKey) {
       throw new Error("ChatGPT steering revision changed browser conversation identity");
@@ -635,7 +642,7 @@ export function createChatGptWebAdapter(
               .slice(0, 12);
             let sharedSummary = existingStructuredCompactionRun(compactionExecutionKey);
             if (!sharedSummary) {
-              const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
+              const sourceConversationKey = chatGptCompactionSourceConversationKey(parsed, executionNamespace);
               const source = sourceConversationKey
                 ? chatGptTurnSessions.findConversationHead(sourceConversationKey)
                 : undefined;
