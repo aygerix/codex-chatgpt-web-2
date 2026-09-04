@@ -29,3 +29,14 @@ test("browser worker rechecks steer state after the completion fence", () => {
   expect(postFence).toBeGreaterThan(commit);
   expect(finish).toBeGreaterThan(postFence);
 });
+
+
+test("lower-effort steering can bind a semantic assistant before ChatGPT assigns a stable turn id", () => {
+  const source = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+  expect(source).toContain('data-codex-web-gpt-steer-assistant-revision');
+  expect(source).toContain('`[data-message-author-role="${role}"]`');
+  expect(source).toContain('candidate.closest<HTMLElement>("article")');
+  expect(source).toContain('const identity = stableIdentity ?? `codex-steer-${revision}`');
+  expect(source).toContain('binding.identity.startsWith("codex-steer-")');
+  expect(source).toContain('revision,\n          previousUserTurnCount,\n          knownResponseIdentities');
+});
