@@ -18,7 +18,9 @@ jobs:
         with:
           bun-version-file: package.json
       - name: Patch portable canonical collaboration
-        run: python3 .github/scripts/patch-portable-native-collaboration.py
+        run: |
+          python3 .github/scripts/patch-portable-native-collaboration.py
+          python3 .github/scripts/fix-portable-native-collaboration-tests.py
       - name: Install dependencies
         run: |
           bun install --frozen-lockfile
