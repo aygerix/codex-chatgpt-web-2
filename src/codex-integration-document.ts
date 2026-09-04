@@ -108,6 +108,13 @@ export function readCodexModelContextOverride(): CodexModelContextOverride | und
   return contextWindow === undefined ? undefined : { contextWindow };
 }
 
+export function readCodexDefaultSubagentModel(): string | undefined {
+  const path = getCodexConfigPath();
+  if (!existsSync(path)) return undefined;
+  const assignment = findAgentDefaultSubagentModelAssignment(splitLines(readFileSync(path, "utf8")));
+  return assignment.present ? assignment.value : undefined;
+}
+
 export function assignments(lines: string[]): Record<ManagedAssignmentKey, PreviousAssignment> {
   return {
     openai_base_url: findTopLevelAssignment(lines, "openai_base_url"),
@@ -286,6 +293,29 @@ export function findAgentMaxDepthAssignment(lines: string[]): PreviousAgentAssig
   }
   if (matches.length > 1) throw new Error("Codex config contains duplicate [agents].max_depth assignments");
   return { ...(matches[0] ?? { present: false }), tablePresent: true };
+}
+
+export function findAgentDefaultSubagentModelAssignment(lines: string[]): PreviousAssignment {
+  const table = findTomlTable(lines, "agents");
+  if (!table) return { present: false };
+  const regex = assignmentRegex("default_subagent_model");
+  const matches: PreviousAssignment[] = [];
+  for (let index = table.headerIndex + 1; index < table.endIndex; index += 1) {
+    const line = lines[index]!;
+    if (/^\s*#/.test(line)) continue;
+    const match = regex.exec(line);
+    if (!match) continue;
+    matches.push({
+      present: true,
+      rawLine: line,
+      value: decodeTomlString(match[1]!, "default_subagent_model"),
+      index,
+    });
+  }
+  if (matches.length > 1) {
+    throw new Error("Codex config contains duplicate [agents].default_subagent_model assignments");
+  }
+  return matches[0] ?? { present: false };
 }
 
 function setAgentMaxDepth(document: CodexConfigDocument, value: number): void {

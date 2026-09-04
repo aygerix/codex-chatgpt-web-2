@@ -407,3 +407,154 @@ test("a non-event-stream body is passed through untouched", async () => {
 
   expect(await response.text()).toBe('{"ok":true}');
 });
+
+
+function nativeCollaborationStream(item: Record<string, unknown>): Response {
+  const event = {
+    type: "response.output_item.done",
+    output_index: 0,
+    item,
+  };
+  return new Response(
+    `event: response.output_item.done\ndata: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`,
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+test("native V2 Web spawn is marked for plaintext delivery without changing its task arguments", async () => {
+  const body = {
+    model: "gpt-5.6-sol",
+    input: [],
+  };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const argumentsJson = JSON.stringify({
+    message: "inspect package.json",
+    task_name: "web-audit",
+    model: "chatgpt-web/extra-high",
+    reasoning_effort: "xhigh",
+  });
+  const response = await forwardNativeCodexRequest(request, "responses", async () => (
+    nativeCollaborationStream({
+      type: "function_call",
+      call_id: "call_web_spawn",
+      namespace: "collaboration",
+      name: "spawn_agent",
+      arguments: argumentsJson,
+      encrypted_function_args: ["native-ciphertext"],
+    })
+  ), body);
+  const text = await response.text();
+  expect(text).toContain(`"arguments":${JSON.stringify(argumentsJson)}`);
+  expect(text).toContain('"encrypted_function_args":[]');
+  expect(text).not.toContain('native-ciphertext');
+});
+
+test("configured Web default marks a native V2 spawn that omits model", async () => {
+  const body = { model: "gpt-5.6-sol", input: [] };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await forwardNativeCodexRequest(request, "responses", async () => (
+    nativeCollaborationStream({
+      type: "function_call",
+      call_id: "call_default_web_spawn",
+      namespace: "collaboration",
+      name: "spawn_agent",
+      arguments: JSON.stringify({ message: "work", task_name: "worker" }),
+      encrypted_function_args: ["native-ciphertext"],
+    })
+  ), body, { defaultSubagentModel: "chatgpt-web/extra-high" });
+  expect(await response.text()).toContain('"encrypted_function_args":[]');
+});
+
+test("native V2 native-model spawn preserves encrypted delivery", async () => {
+  const body = { model: "gpt-5.6-sol", input: [] };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await forwardNativeCodexRequest(request, "responses", async () => (
+    nativeCollaborationStream({
+      type: "function_call",
+      call_id: "call_native_spawn",
+      namespace: "collaboration",
+      name: "spawn_agent",
+      arguments: JSON.stringify({ message: "work", task_name: "worker", model: "gpt-5.6-sol" }),
+      encrypted_function_args: ["native-ciphertext"],
+    })
+  ), body, { defaultSubagentModel: "chatgpt-web/extra-high" });
+  const text = await response.text();
+  expect(text).toContain('native-ciphertext');
+  expect(text).not.toContain('"encrypted_function_args":[]');
+});
+
+test("native V2 follow-up to a previously spawned Web child is marked plaintext", async () => {
+  const spawnArgs = JSON.stringify({
+    message: "initial task",
+    task_name: "web-worker",
+    model: "chatgpt-web/extra-high",
+  });
+  const body = {
+    model: "gpt-5.6-sol",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_prior_spawn",
+        namespace: "collaboration",
+        name: "spawn_agent",
+        arguments: spawnArgs,
+        encrypted_function_args: [],
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_prior_spawn",
+        output: JSON.stringify({ task_name: "web-worker", nickname: "Kepler" }),
+      },
+    ],
+  };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await forwardNativeCodexRequest(request, "responses", async () => (
+    nativeCollaborationStream({
+      type: "function_call",
+      call_id: "call_followup",
+      namespace: "collaboration",
+      name: "followup_task",
+      arguments: JSON.stringify({ target: "web-worker", message: "continue with the second check" }),
+      encrypted_function_args: ["native-followup-ciphertext"],
+    })
+  ), body);
+  const text = await response.text();
+  expect(text).toContain('"encrypted_function_args":[]');
+  expect(text).not.toContain('native-followup-ciphertext');
+});
+
+test("native V2 message to an unknown/native child keeps encrypted delivery", async () => {
+  const body = { model: "gpt-5.6-sol", input: [] };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await forwardNativeCodexRequest(request, "responses", async () => (
+    nativeCollaborationStream({
+      type: "function_call",
+      call_id: "call_native_message",
+      namespace: "collaboration",
+      name: "send_message",
+      arguments: JSON.stringify({ target: "native-worker", message: "status" }),
+      encrypted_function_args: ["native-message-ciphertext"],
+    })
+  ), body, { defaultSubagentModel: "chatgpt-web/extra-high" });
+  expect(await response.text()).toContain('native-message-ciphertext');
+});

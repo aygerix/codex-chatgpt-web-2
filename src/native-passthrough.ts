@@ -122,6 +122,204 @@ export function scrubBridgeArtifactsForNative(value: unknown): { value: unknown;
   return { value: clean, changed: true };
 }
 
+export interface NativeCodexPassthroughOptions {
+  /** Configured Codex child-model default; used only when spawn_agent omits an explicit model. */
+  defaultSubagentModel?: string;
+}
+
+interface NativeWebCollaborationContext {
+  defaultSubagentModel?: string;
+  webTargets: Set<string>;
+}
+
+const NATIVE_WEB_PLAINTEXT_COLLABORATION_CALLS = new Set([
+  "spawn_agent",
+  "send_message",
+  "followup_task",
+]);
+
+function chatGptWebModel(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith("chatgpt-web/");
+}
+
+function jsonArguments(value: unknown): JsonObject | undefined {
+  if (isObject(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return isObject(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function functionOutputObject(value: unknown): JsonObject | undefined {
+  if (isObject(value)) return value;
+  const texts: string[] = [];
+  if (typeof value === "string") texts.push(value);
+  else if (Array.isArray(value)) {
+    for (const item of value) {
+      if (!isObject(item)) continue;
+      const text = item.text;
+      if (typeof text === "string") texts.push(text);
+    }
+  }
+  for (const text of texts) {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (isObject(parsed)) return parsed;
+    } catch {
+      // A human-readable tool output is not agent metadata; keep looking.
+    }
+  }
+  return undefined;
+}
+
+function collectNativeWebTargets(requestBody: unknown, defaultSubagentModel?: string): Set<string> {
+  const targets = new Set<string>();
+  if (!isObject(requestBody) || !Array.isArray(requestBody.input)) return targets;
+  const webSpawnCalls = new Set<string>();
+  for (const raw of requestBody.input) {
+    if (!isObject(raw)
+      || raw.type !== "function_call"
+      || raw.namespace !== "collaboration"
+      || raw.name !== "spawn_agent"
+      || typeof raw.call_id !== "string") continue;
+    const args = jsonArguments(raw.arguments);
+    const model = args?.model ?? defaultSubagentModel;
+    if (chatGptWebModel(model)) webSpawnCalls.add(raw.call_id);
+  }
+  for (const raw of requestBody.input) {
+    if (!isObject(raw)
+      || raw.type !== "function_call_output"
+      || typeof raw.call_id !== "string"
+      || !webSpawnCalls.has(raw.call_id)) continue;
+    const result = functionOutputObject(raw.output);
+    if (!result) continue;
+    for (const key of ["task_name", "nickname", "agent_id", "thread_id"] as const) {
+      const value = result[key];
+      if (typeof value === "string" && value.trim()) targets.add(value);
+    }
+  }
+  return targets;
+}
+
+function shouldDeliverNativeCollaborationPlaintext(
+  call: JsonObject,
+  context: NativeWebCollaborationContext,
+): boolean {
+  if (call.type !== "function_call"
+    || call.namespace !== "collaboration"
+    || typeof call.name !== "string"
+    || !NATIVE_WEB_PLAINTEXT_COLLABORATION_CALLS.has(call.name)) return false;
+  const args = jsonArguments(call.arguments);
+  if (!args) return false;
+  if (call.name === "spawn_agent") {
+    return chatGptWebModel(args.model ?? context.defaultSubagentModel);
+  }
+  const target = args.target;
+  return typeof target === "string" && context.webTargets.has(target);
+}
+
+/**
+ * Mark only Web-targeted V2 collaboration calls for Codex's existing DirectPlaintextMessage path.
+ * The native tool router treats an empty encrypted_function_args array as an explicit plaintext
+ * delivery marker for collaboration.spawn_agent/send_message/followup_task. We never decrypt,
+ * inspect, or alter the ciphertext itself; native->native calls remain exactly as the backend sent
+ * them.
+ */
+export function rewriteNativeCollaborationForWeb(
+  value: unknown,
+  requestBody: unknown,
+  options: NativeCodexPassthroughOptions = {},
+): { value: unknown; changed: boolean; calls: string[] } {
+  const context: NativeWebCollaborationContext = {
+    ...(options.defaultSubagentModel ? { defaultSubagentModel: options.defaultSubagentModel } : {}),
+    webTargets: collectNativeWebTargets(requestBody, options.defaultSubagentModel),
+  };
+  const calls: string[] = [];
+  const visit = (candidate: unknown): unknown => {
+    if (Array.isArray(candidate)) return candidate.map(visit);
+    if (!isObject(candidate)) return candidate;
+    let out: JsonObject = candidate;
+    if (shouldDeliverNativeCollaborationPlaintext(candidate, context)) {
+      out = { ...candidate, encrypted_function_args: [] };
+      calls.push(String(candidate.name));
+    }
+    let changedChild = out !== candidate;
+    const next: JsonObject = changedChild ? out : { ...candidate };
+    for (const [key, child] of Object.entries(out)) {
+      const rewritten = visit(child);
+      if (rewritten !== child) {
+        next[key] = rewritten;
+        changedChild = true;
+      }
+    }
+    return changedChild ? next : candidate;
+  };
+  const rewritten = visit(value);
+  return { value: rewritten, changed: rewritten !== value, calls };
+}
+
+function transformNativeCollaborationSse(
+  body: ReadableStream<Uint8Array>,
+  requestBody: unknown,
+  options: NativeCodexPassthroughOptions,
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffered = "";
+  const transformLine = (line: string): string => {
+    const carriage = line.endsWith("\r") ? "\r" : "";
+    const clean = carriage ? line.slice(0, -1) : line;
+    if (!clean.startsWith("data: ") || clean === SSE_TERMINATOR) return line;
+    let payload: unknown;
+    try { payload = JSON.parse(clean.slice("data: ".length)); }
+    catch { return line; }
+    const rewritten = rewriteNativeCollaborationForWeb(payload, requestBody, options);
+    if (!rewritten.changed) return line;
+    for (const name of [...new Set(rewritten.calls)]) {
+      console.info(`[codex-chatgpt-web] native_web_collaboration_plaintext call=${name}`);
+    }
+    return `data: ${JSON.stringify(rewritten.value)}${carriage}`;
+  };
+  const transformCompleteLines = (text: string): { output: string; remainder: string } => {
+    const lastNewline = text.lastIndexOf("\n");
+    if (lastNewline < 0) return { output: "", remainder: text };
+    const complete = text.slice(0, lastNewline + 1);
+    const remainder = text.slice(lastNewline + 1);
+    const output = complete
+      .split("\n")
+      .slice(0, -1)
+      .map(transformLine)
+      .join("\n") + "\n";
+    return { output, remainder };
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          buffered += decoder.decode();
+          if (buffered) controller.enqueue(encoder.encode(transformLine(buffered)));
+          controller.close();
+          return;
+        }
+        buffered += decoder.decode(chunk.value, { stream: true });
+        const transformed = transformCompleteLines(buffered);
+        buffered = transformed.remainder;
+        if (!transformed.output) continue;
+        controller.enqueue(encoder.encode(transformed.output));
+        return;
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
 function endToEndHeaders(source: Headers): Headers {
   const headers = new Headers();
   for (const [name, value] of source) {
@@ -204,6 +402,7 @@ export async function forwardNativeCodexRequest(
   endpoint: NativeCodexEndpoint,
   fetchUpstream: NativeFetch = fetch,
   decodedBody?: unknown,
+  options: NativeCodexPassthroughOptions = {},
 ): Promise<Response> {
   const authorization = request.headers.get("authorization") ?? "";
   if (!authorization.startsWith("Bearer ") || authorization.length <= "Bearer ".length) {
@@ -219,12 +418,12 @@ export async function forwardNativeCodexRequest(
   if (endpoint === "models") headers.delete("if-none-match");
   const method = endpoint === "models" ? "GET" : "POST";
   let body: BodyInit | undefined;
+  let parsedRequestBody = decodedBody;
   if (method === "POST") {
     const parseRequest = decodedBody === undefined ? request.clone() : undefined;
     const originalBody = await request.arrayBuffer();
-    const scrubbed = scrubBridgeArtifactsForNative(
-      decodedBody === undefined ? await readJsonRequestBody(parseRequest!) : decodedBody,
-    );
+    parsedRequestBody = decodedBody === undefined ? await readJsonRequestBody(parseRequest!) : decodedBody;
+    const scrubbed = scrubBridgeArtifactsForNative(parsedRequestBody);
     if (scrubbed.changed) {
       headers.delete("content-encoding");
       body = JSON.stringify(scrubbed.value);
@@ -243,15 +442,19 @@ export async function forwardNativeCodexRequest(
   const isEventStream = (upstream.headers.get("content-type") ?? "")
     .toLowerCase()
     .includes("text/event-stream");
+  let responseBody = upstream.body
+    ? withUncleanCloseTolerance(upstream.body, isEventStream, bytes => {
+      console.warn(
+        `[codex-chatgpt-web] native_upstream_unclean_close endpoint=${endpoint} bytes=${bytes}`
+        + " (turn had already completed; closing the client stream normally)",
+      );
+    })
+    : upstream.body;
+  if (responseBody && isEventStream && endpoint === "responses") {
+    responseBody = transformNativeCollaborationSse(responseBody, parsedRequestBody, options);
+  }
   return new Response(
-    upstream.body
-      ? withUncleanCloseTolerance(upstream.body, isEventStream, bytes => {
-        console.warn(
-          `[codex-chatgpt-web] native_upstream_unclean_close endpoint=${endpoint} bytes=${bytes}`
-          + " (turn had already completed; closing the client stream normally)",
-        );
-      })
-      : upstream.body,
+    responseBody,
     {
       status: upstream.status,
       statusText: upstream.statusText,

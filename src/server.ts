@@ -14,6 +14,7 @@ import { httpStatusFromTerminalError } from "./lib/errors";
 import { createHash } from "node:crypto";
 import { augmentNativeModelCatalog } from "./model-catalog";
 import {
+  readCodexDefaultSubagentModel,
   readCodexModelContextOverride,
   readCodexSubagentProtocol,
   type CodexModelContextOverride,
@@ -364,7 +365,9 @@ export async function responseRequest(
     : undefined;
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
     try {
-      return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
+      return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw, {
+        defaultSubagentModel: readCodexDefaultSubagentModel(),
+      });
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
