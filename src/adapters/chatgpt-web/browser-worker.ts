@@ -3443,6 +3443,44 @@ export class ChatGptBrowserWorker {
     return this.config.appName;
   }
 
+  private async detectSetupAccountCapabilities(page: Page) {
+    const initial = await detectChatGptAccountCapabilities(page);
+    if (!initial.solAvailable || initial.proAvailable) return initial;
+
+    // A Pro account can expose only the three non-Pro effort positions while a Temporary Chat is
+    // in the other personalization state, and ChatGPT does not reliably render the labeled
+    // Personalized/Unpersonalized button. Probe the structural two-state control instead: flip it,
+    // rescan the effort surface, and keep the flipped state only when that objectively reveals the
+    // five-position Pro catalog. If it does not, restore the exact original state before returning.
+    const deadline = Date.now() + CHATGPT_PERSONALIZATION_PREFLIGHT_TIMEOUT_MS;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(1, deadline - Date.now()));
+    timer.unref?.();
+    let receipt: ChatGptPersonalizationToggleReceipt | undefined;
+    try {
+      receipt = await toggleChatGptPersonalizationChoice(page, deadline, controller.signal);
+      const toggled = await detectChatGptAccountCapabilities(page);
+      if (toggled.solAvailable && toggled.proAvailable) return toggled;
+      await restoreChatGptPersonalizationChoice(page, receipt);
+      receipt = undefined;
+      return initial;
+    } catch (error) {
+      if (receipt) {
+        try {
+          await restoreChatGptPersonalizationChoice(page, receipt);
+        } catch (restoreError) {
+          throw new ChatGptPersistentBrowserStateError(
+            [error, restoreError],
+            "ChatGPT setup capability probe failed and its personalization state could not be restored",
+          );
+        }
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async inspectSessionExclusive(detectCapabilities: boolean): Promise<{
     authenticated: true;
     temporary: true;
@@ -3454,11 +3492,7 @@ export class ChatGptBrowserWorker {
     await this.prepareTemporaryChatSurface(page);
     const url = page.url();
     if (!detectCapabilities) return { authenticated: true, temporary: true, url };
-    // Account/model installation must inspect the same Personalized Temporary Chat surface that
-    // exposes Pro-only effort levels. Ordinary browser-only turns intentionally do not require
-    // this control; this preflight is scoped only to explicit capability detection.
-    await ensureChatGptPersonalizedConnectorAccess(page);
-    const capabilities = await detectChatGptAccountCapabilities(page);
+    const capabilities = await this.detectSetupAccountCapabilities(page);
     return { authenticated: true, temporary: true, url, ...capabilities };
   }
 

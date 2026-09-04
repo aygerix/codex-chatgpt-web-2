@@ -93,18 +93,22 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   expect(selectConnector).toContain("await ensureChatGptPersonalizedConnectorAccess(");
   expect(selectConnector).toContain("async (personalizationSignal) =>");
   expect(selectConnector).toContain("await appResult.waitFor");
+  const setupCapabilityProbe = workerSource.slice(
+    workerSource.indexOf("  private async detectSetupAccountCapabilities("),
+    workerSource.indexOf("  private async inspectSessionExclusive("),
+  );
+  expect(setupCapabilityProbe).toContain("const initial = await detectChatGptAccountCapabilities(page)");
+  expect(setupCapabilityProbe).toContain("await toggleChatGptPersonalizationChoice(page, deadline, controller.signal)");
+  expect(setupCapabilityProbe).toContain("const toggled = await detectChatGptAccountCapabilities(page)");
+  expect(setupCapabilityProbe).toContain("if (toggled.solAvailable && toggled.proAvailable) return toggled");
+  expect(setupCapabilityProbe).toContain("await restoreChatGptPersonalizationChoice(page, receipt)");
+  expect(setupCapabilityProbe).not.toContain("ensureChatGptPersonalizedConnectorAccess(");
   const inspectSessionExclusive = workerSource.slice(
     workerSource.indexOf("  private async inspectSessionExclusive("),
     workerSource.indexOf("  private async smokeTestExclusive("),
   );
-  const capabilityPersonalization = inspectSessionExclusive.indexOf(
-    "await ensureChatGptPersonalizedConnectorAccess(page);",
-  );
-  const capabilityDetection = inspectSessionExclusive.indexOf(
-    "await detectChatGptAccountCapabilities(page);",
-  );
-  expect(capabilityPersonalization).toBeGreaterThan(-1);
-  expect(capabilityDetection).toBeGreaterThan(capabilityPersonalization);
+  expect(inspectSessionExclusive).toContain("await this.detectSetupAccountCapabilities(page)");
+  expect(inspectSessionExclusive).not.toContain("ensureChatGptPersonalizedConnectorAccess(");
   expect(workerSource).toContain("__CODEX_WEB_GPT_STEER_REVISION__");
   expect(workerSource).toContain("waitForSteeredAssistantTurn");
   expect(workerSource).toContain("completionSteerRevision > handledSteerRevision");
