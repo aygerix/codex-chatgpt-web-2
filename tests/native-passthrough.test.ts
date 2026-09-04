@@ -558,3 +558,40 @@ test("native V2 message to an unknown/native child keeps encrypted delivery", as
   ), body, { defaultSubagentModel: "chatgpt-web/extra-high" });
   expect(await response.text()).toContain('native-message-ciphertext');
 });
+
+
+test("native V2 follow-up recognizes the Web child task_name directly from spawn history", async () => {
+  const body = {
+    model: "gpt-5.6-sol",
+    input: [{
+      type: "function_call",
+      call_id: "call_spawn_without_output_metadata",
+      namespace: "collaboration",
+      name: "spawn_agent",
+      arguments: JSON.stringify({
+        message: "initial task",
+        task_name: "web-task-direct",
+        model: "chatgpt-web/extra-high",
+      }),
+      encrypted_function_args: [],
+    }],
+  };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await forwardNativeCodexRequest(request, "responses", async () => (
+    nativeCollaborationStream({
+      type: "function_call",
+      call_id: "call_followup_direct_task",
+      namespace: "collaboration",
+      name: "followup_task",
+      arguments: JSON.stringify({ target: "web-task-direct", message: "continue" }),
+      encrypted_function_args: ["native-followup-ciphertext"],
+    })
+  ), body);
+  const text = await response.text();
+  expect(text).toContain('"encrypted_function_args":[]');
+  expect(text).not.toContain('native-followup-ciphertext');
+});

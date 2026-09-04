@@ -187,7 +187,13 @@ function collectNativeWebTargets(requestBody: unknown, defaultSubagentModel?: st
       || typeof raw.call_id !== "string") continue;
     const args = jsonArguments(raw.arguments);
     const model = args?.model ?? defaultSubagentModel;
-    if (chatGptWebModel(model)) webSpawnCalls.add(raw.call_id);
+    if (chatGptWebModel(model)) {
+      webSpawnCalls.add(raw.call_id);
+      // V2 task_name is a canonical target accepted by later send_message/followup_task calls.
+      // Remember it directly from the spawn request so cross-backend routing does not depend on
+      // one particular function_call_output metadata shape surviving replay or compaction.
+      if (typeof args?.task_name === "string" && args.task_name.trim()) targets.add(args.task_name);
+    }
   }
   for (const raw of requestBody.input) {
     if (!isObject(raw)

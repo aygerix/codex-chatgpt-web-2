@@ -2936,11 +2936,17 @@ export class ChatGptBrowserWorker {
       throw new Error(`ChatGPT exposed ${boundCount} DOM nodes for the bound assistant turn`);
     }
     const state = await this.submissionDomState(page, baseline.domCache, signal);
-    const acceptedUsers = new Set(binding.acceptedUserTurnIdentities);
-    if (state.userIdentities.some(identity => !acceptedUsers.has(identity))) {
-      throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
+    const provisionalSteerBinding = binding.identity.startsWith("codex-steer-");
+    if (!provisionalSteerBinding) {
+      const acceptedUsers = new Set(binding.acceptedUserTurnIdentities);
+      if (state.userIdentities.some(identity => !acceptedUsers.has(identity))) {
+        throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
+      }
     }
-    const identity = binding.identity.startsWith("codex-steer-")
+    // A provisional steer binding can outlive ChatGPT's temporary user/assistant DOM identities.
+    // The accepted steer revision, not an early product data-testid, is the authority for that one
+    // continuation. Once ChatGPT publishes its stable assistant identity, upgrade the binding.
+    const identity = provisionalSteerBinding
       ? chatGptNewTurnIdentity(
         baseline.initialResponseTurnIdentities,
         state.responseIdentities,

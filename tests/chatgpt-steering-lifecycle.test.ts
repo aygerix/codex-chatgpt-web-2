@@ -40,3 +40,11 @@ test("lower-effort steering can bind a semantic assistant before ChatGPT assigns
   expect(source).toContain('binding.identity.startsWith("codex-steer-")');
   expect(source).toContain('revision,\n          previousUserTurnCount,\n          knownResponseIdentities');
 });
+
+
+test("provisional steer reconciliation trusts the accepted steer epoch while stable ids hydrate", () => {
+  const source = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+  expect(source).toContain('const provisionalSteerBinding = binding.identity.startsWith("codex-steer-")');
+  expect(source).toContain('if (!provisionalSteerBinding)');
+  expect(source).toContain('const identity = provisionalSteerBinding');
+});
