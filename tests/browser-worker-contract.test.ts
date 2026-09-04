@@ -111,7 +111,9 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   expect(inspectSessionExclusive).not.toContain("ensureChatGptPersonalizedConnectorAccess(");
   expect(workerSource).toContain("__CODEX_WEB_GPT_STEER_REVISION__");
   expect(workerSource).toContain("waitForSteeredAssistantTurn");
-  expect(workerSource).toContain("completionSteerRevision > handledSteerRevision");
+  expect(workerSource).toContain("__CODEX_WEB_GPT_STEER_PENDING_REVISION__");
+  expect(workerSource).toContain("chatGptCodexSteerDisposition");
+  expect(workerSource).toContain("const postFenceSteerState = await this.readCodexSteerState(page)");
   const observationCatch = workerSource.slice(
     workerSource.indexOf("       } catch (error) {", workerSource.indexOf("for (;;) {", workerSource.indexOf("let completionFenceRevision"))),
     workerSource.indexOf("      if (this.context && this.config.browserHost", workerSource.indexOf("let completionFenceRevision")),

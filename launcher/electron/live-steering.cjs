@@ -25,6 +25,8 @@ function liveSteerScript(text, revision) {
     const userTurnSelector = ${JSON.stringify(CHATGPT_USER_TURN_SELECTOR)};
     const text = ${JSON.stringify(text)};
     const revision = ${JSON.stringify(revision)};
+    globalThis.__CODEX_WEB_GPT_STEER_PENDING_REVISION__ = revision;
+    document.documentElement.dataset.codexWebGptSteerPendingRevision = String(revision);
     const visible = (element) => {
       const style = getComputedStyle(element);
       const bounds = element.getBoundingClientRect();
@@ -34,6 +36,7 @@ function liveSteerScript(text, revision) {
         && style.display !== "none"
         && style.visibility !== "hidden";
     };
+    try {
     const composers = [...document.querySelectorAll(composerSelector)].filter(visible);
     if (composers.length !== 1) {
       throw new Error("ChatGPT steer requires exactly one visible composer");
@@ -86,6 +89,14 @@ function liveSteerScript(text, revision) {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     throw new Error("ChatGPT steer send was activated but acceptance was not observed");
+    } finally {
+      if (globalThis.__CODEX_WEB_GPT_STEER_PENDING_REVISION__ === revision) {
+        delete globalThis.__CODEX_WEB_GPT_STEER_PENDING_REVISION__;
+      }
+      if (document.documentElement.dataset.codexWebGptSteerPendingRevision === String(revision)) {
+        delete document.documentElement.dataset.codexWebGptSteerPendingRevision;
+      }
+    }
   })()`;
 }
 

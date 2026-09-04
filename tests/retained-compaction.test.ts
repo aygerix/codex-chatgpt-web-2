@@ -803,7 +803,7 @@ test("adapter compact returns one same-agent handoff and preserves a pre-existin
   const sourceRequest = request(false);
   const namespace = chatGptWebExecutionNamespace(provider);
   const sourceKey = `${namespace}:${chatGptTurnExecutionKey(sourceRequest)}`;
-  const conversationKey = chatGptConversationKey(sourceRequest, namespace)!;
+  const conversationKey = chatGptConversationKey(sourceRequest, namespace, { turnScoped: true })!;
   let releases = 0;
   chatGptTurnSessions.getOrCreate(sourceKey, () => ({
     mode: "read-only",
@@ -847,7 +847,7 @@ test("adapter compact returns one same-agent handoff and preserves a pre-existin
       turn_id: "turn_compact",
     }),
   };
-  expect(chatGptConversationKey(compact, namespace)).toBe(conversationKey);
+  expect(chatGptConversationKey(compact, namespace, { turnScoped: true })).not.toBe(conversationKey);
   const compactedSourceKey = `${namespace}:${chatGptCompactionSourceExecutionKey(compact)}`;
   expect(compactedSourceKey).not.toBe(sourceKey);
   const events: AdapterEvent[] = [];
@@ -898,7 +898,7 @@ test("a compact HTTP observer can reconnect without sending a second retained-ch
   const sourceRequest = request(false);
   const namespace = chatGptWebExecutionNamespace(provider);
   const sourceKey = `${namespace}:${chatGptTurnExecutionKey(sourceRequest)}`;
-  const conversationKey = chatGptConversationKey(sourceRequest, namespace)!;
+  const conversationKey = chatGptConversationKey(sourceRequest, namespace, { turnScoped: true })!;
   let releases = 0;
   chatGptTurnSessions.getOrCreate(sourceKey, () => ({
     mode: "read-only",
@@ -1049,7 +1049,7 @@ test("structured compact rebuilds canonical context when its retained browser di
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     usageInput: sourceRequest,
-    conversationKey: chatGptConversationKey(sourceRequest, namespace)!,
+    conversationKey: chatGptConversationKey(sourceRequest, namespace, { turnScoped: true })!,
     cancel() {},
   }));
   await chatGptTurnSessions.find(sourceKey)!.browserOutcome;
@@ -1109,7 +1109,7 @@ test("a disappeared retained source cannot leave its fresh compaction rebuild pa
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     usageInput: sourceRequest,
-    conversationKey: chatGptConversationKey(sourceRequest, namespace)!,
+    conversationKey: chatGptConversationKey(sourceRequest, namespace, { turnScoped: true })!,
     cancel() {},
   }));
   await chatGptTurnSessions.find(sourceKey)!.browserOutcome;

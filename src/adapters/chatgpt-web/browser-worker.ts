@@ -134,6 +134,22 @@ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
 export const CHATGPT_UI_SETTLE_MS = 250;
 export const CHATGPT_SEND_ENABLE_GRACE_MS = 5_000;
 
+export interface ChatGptCodexSteerState {
+  accepted: number;
+  pending: number;
+}
+
+export type ChatGptCodexSteerDisposition = "apply" | "wait" | "none";
+
+export function chatGptCodexSteerDisposition(
+  state: ChatGptCodexSteerState,
+  handledRevision: number,
+): ChatGptCodexSteerDisposition {
+  if (state.accepted > handledRevision) return "apply";
+  if (state.pending > handledRevision) return "wait";
+  return "none";
+}
+
 const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "aria-hidden",
   "aria-label",
@@ -2420,12 +2436,26 @@ export class ChatGptBrowserWorker {
     return await this.activeComposer(page);
   }
 
-  private async readCodexSteerRevision(page: Page): Promise<number> {
+  private async readCodexSteerState(page: Page): Promise<ChatGptCodexSteerState> {
     return await page.evaluate(() => {
-      const value = (globalThis as typeof globalThis & { __CODEX_WEB_GPT_STEER_REVISION__?: unknown })
-        .__CODEX_WEB_GPT_STEER_REVISION__;
-      return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;
-    }).catch(() => 0);
+      const scope = globalThis as typeof globalThis & {
+        __CODEX_WEB_GPT_STEER_REVISION__?: unknown;
+        __CODEX_WEB_GPT_STEER_PENDING_REVISION__?: unknown;
+      };
+      const acceptedValue = scope.__CODEX_WEB_GPT_STEER_REVISION__;
+      const pendingValue = scope.__CODEX_WEB_GPT_STEER_PENDING_REVISION__;
+      const accepted = Number.isSafeInteger(acceptedValue) && Number(acceptedValue) >= 0
+        ? Number(acceptedValue)
+        : 0;
+      const pending = Number.isSafeInteger(pendingValue) && Number(pendingValue) >= 0
+        ? Number(pendingValue)
+        : 0;
+      return { accepted, pending };
+    }).catch(() => ({ accepted: 0, pending: 0 }));
+  }
+
+  private async readCodexSteerRevision(page: Page): Promise<number> {
+    return (await this.readCodexSteerState(page)).accepted;
   }
 
   private async waitForSteeredAssistantTurn(
@@ -4548,9 +4578,15 @@ export class ChatGptBrowserWorker {
           throw new Error("ChatGPT web turn timed out");
         }
         await throwIfChatGptSessionFailureAlert(page);
-        const pendingSteerRevision = await this.readCodexSteerRevision(page);
-        if (pendingSteerRevision > handledSteerRevision) {
-          await applyCodexSteer(pendingSteerRevision);
+        const steerState = await this.readCodexSteerState(page);
+        const steerDisposition = chatGptCodexSteerDisposition(steerState, handledSteerRevision);
+        if (steerDisposition === "apply") {
+          await applyCodexSteer(steerState.accepted);
+          continue;
+        }
+        if (steerDisposition === "wait") {
+          completionFenceRevision = undefined;
+          await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
           continue;
         }
         await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
@@ -4687,9 +4723,18 @@ export class ChatGptBrowserWorker {
           });
           if (!completionReady) completionFenceRevision = undefined;
           if (completionReady) {
-            const completionSteerRevision = await this.readCodexSteerRevision(page);
-            if (completionSteerRevision > handledSteerRevision) {
-              await applyCodexSteer(completionSteerRevision);
+            const completionSteerState = await this.readCodexSteerState(page);
+            const completionSteerDisposition = chatGptCodexSteerDisposition(
+              completionSteerState,
+              handledSteerRevision,
+            );
+            if (completionSteerDisposition === "apply") {
+              await applyCodexSteer(completionSteerState.accepted);
+              continue;
+            }
+            if (completionSteerDisposition === "wait") {
+              completionFenceRevision = undefined;
+              await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
               continue;
             }
             if (turn.completionFence) {
@@ -4715,6 +4760,26 @@ export class ChatGptBrowserWorker {
                 await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
                 continue;
               }
+            }
+            // A live steer can be accepted after the last DOM completion projection but before the
+            // broker fence commits. Re-check after the fence so the old assistant response can never
+            // retire the same-turn helper/token underneath the steered continuation.
+            const postFenceSteerState = await this.readCodexSteerState(page);
+            const postFenceSteerDisposition = chatGptCodexSteerDisposition(
+              postFenceSteerState,
+              handledSteerRevision,
+            );
+            if (postFenceSteerDisposition === "apply") {
+              completionFenceRevision = undefined;
+              await applyCodexSteer(postFenceSteerState.accepted);
+              continue;
+            }
+            if (postFenceSteerDisposition === "wait") {
+              completionFenceRevision = undefined;
+              responseDomCache.key = undefined;
+              responseDomCache.snapshot = undefined;
+              await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
+              continue;
             }
             if (snapshot.visibleText === "api_tool unavailable") {
               throw new Error("ChatGPT selected mode rejected the Codex Native MCP tool (api_tool unavailable)");
