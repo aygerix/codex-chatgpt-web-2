@@ -1,0 +1,51 @@
+name: One-shot macOS DMG build
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-dmg:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - name: Check out known-good bridge state
+        uses: actions/checkout@v6
+        with:
+          ref: 914e98ec4de30fac62debdac91b6ad8f3dd18ab1
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile
+          (cd launcher && bun install --frozen-lockfile)
+
+      - name: Build macOS package
+        run: bun run app:package
+
+      - name: Verify DMG
+        run: |
+          uname -m
+          ls -lah launcher/artifacts
+          test "$(find launcher/artifacts -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')" = "1"
+          DMG="$(find launcher/artifacts -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          file "$DMG"
+          test -s "$DMG"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Codex-Web-GPT-macOS-arm64-DMG
+          path: launcher/artifacts/*.dmg
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
