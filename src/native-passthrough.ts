@@ -259,82 +259,115 @@ export function rewriteNativeCollaborationToolsForWeb(
   value: unknown,
   options: NativeCodexPassthroughOptions = {},
 ): { value: unknown; changed: boolean } {
-  if (!isObject(value) || !Array.isArray(value.tools)) return { value, changed: false };
+  if (!isObject(value)) return { value, changed: false };
   const nativeTargets = collectNativeTargetsByKind(value, options.defaultSubagentModel, false);
   const nativeTargetList = [...nativeTargets].sort();
-  let changed = false;
-  const tools = value.tools.map(rawNamespace => {
-    if (!isObject(rawNamespace)
-      || rawNamespace.type !== "namespace"
-      || rawNamespace.name !== "collaboration"
-      || !Array.isArray(rawNamespace.tools)) return rawNamespace;
-    let namespaceChanged = false;
-    const existingNames = new Set(rawNamespace.tools
-      .filter(isObject)
-      .map(tool => tool.name)
-      .filter((name): name is string => typeof name === "string"));
-    const nextTools: unknown[] = [];
-    for (const rawTool of rawNamespace.tools) {
-      if (!isObject(rawTool) || rawTool.type !== "function" || typeof rawTool.name !== "string") {
-        nextTools.push(rawTool);
-        continue;
-      }
-      const name = rawTool.name;
-      if (name === "spawn_agent") {
-        const portableSpawn = collaborationMessageToolClone(
-          rawTool,
-          "spawn_agent",
-          "Portable collaboration spawn. Use this canonical tool for any child backend, including chatgpt-web/. The task message is intentionally plaintext so cross-backend children can read it. Use spawn_native_agent only when native-only encrypted delivery is explicitly required.",
-          true,
-        );
-        nextTools.push(portableSpawn);
-        if (!existingNames.has(NATIVE_ENCRYPTED_ALIAS_FOR.spawn_agent)) {
-          const nativeSpawn = collaborationMessageToolClone(
-            rawTool,
-            NATIVE_ENCRYPTED_ALIAS_FOR.spawn_agent,
-            "Native-only encrypted spawn. An explicit non-chatgpt-web model is required. Never use this surface for a chatgpt-web/... child.",
-            false,
-          );
-          requireCollaborationToolParameter(nativeSpawn, "model");
-          const parameters = isObject(nativeSpawn.parameters) ? nativeSpawn.parameters : undefined;
-          const properties = parameters && isObject(parameters.properties) ? parameters.properties : undefined;
-          const model = properties && isObject(properties.model) ? properties.model : undefined;
-          if (model) model.pattern = "^(?!chatgpt-web/).+$";
-          nextTools.push(nativeSpawn);
+  const rewriteTools = (rawTools: unknown[]): { tools: unknown[]; changed: boolean } => {
+    let changed = false;
+    const tools = rawTools.map(rawNamespace => {
+      if (!isObject(rawNamespace)
+        || rawNamespace.type !== "namespace"
+        || rawNamespace.name !== "collaboration"
+        || !Array.isArray(rawNamespace.tools)) return rawNamespace;
+      let namespaceChanged = false;
+      const existingNames = new Set(rawNamespace.tools
+        .filter(isObject)
+        .map(tool => tool.name)
+        .filter((name): name is string => typeof name === "string"));
+      const nextTools: unknown[] = [];
+      for (const rawTool of rawNamespace.tools) {
+        if (!isObject(rawTool) || rawTool.type !== "function" || typeof rawTool.name !== "string") {
+          nextTools.push(rawTool);
+          continue;
         }
-        changed = true;
-        namespaceChanged = true;
-        continue;
-      }
-      if (name === "send_message" || name === "followup_task") {
-        const canonical = name as "send_message" | "followup_task";
-        const action = canonical === "send_message" ? "message" : "follow-up task";
-        nextTools.push(collaborationMessageToolClone(
-          rawTool,
-          canonical,
-          `Portable plaintext collaboration ${action}. Use this canonical tool for any child backend, including Web.`,
-          true,
-        ));
-        const nativeAlias = NATIVE_ENCRYPTED_ALIAS_FOR[canonical];
-        if (nativeTargetList.length > 0 && !existingNames.has(nativeAlias)) {
+        const name = rawTool.name;
+        if (name === "spawn_agent") {
+          const portableSpawn = collaborationMessageToolClone(
+            rawTool,
+            "spawn_agent",
+            "Portable collaboration spawn. Use this canonical tool for any child backend, including chatgpt-web/. The task message is intentionally plaintext so cross-backend children can read it. Use spawn_native_agent only when native-only encrypted delivery is explicitly required.",
+            true,
+          );
+          nextTools.push(portableSpawn);
+          if (!existingNames.has(NATIVE_ENCRYPTED_ALIAS_FOR.spawn_agent)) {
+            const nativeSpawn = collaborationMessageToolClone(
+              rawTool,
+              NATIVE_ENCRYPTED_ALIAS_FOR.spawn_agent,
+              "Native-only encrypted spawn. An explicit non-chatgpt-web model is required. Never use this surface for a chatgpt-web/... child.",
+              false,
+            );
+            requireCollaborationToolParameter(nativeSpawn, "model");
+            const parameters = isObject(nativeSpawn.parameters) ? nativeSpawn.parameters : undefined;
+            const properties = parameters && isObject(parameters.properties) ? parameters.properties : undefined;
+            const model = properties && isObject(properties.model) ? properties.model : undefined;
+            if (model) model.pattern = "^(?!chatgpt-web/).+$";
+            nextTools.push(nativeSpawn);
+          }
+          changed = true;
+          namespaceChanged = true;
+          continue;
+        }
+        if (name === "send_message" || name === "followup_task") {
+          const canonical = name as "send_message" | "followup_task";
+          const action = canonical === "send_message" ? "message" : "follow-up task";
           nextTools.push(collaborationMessageToolClone(
             rawTool,
-            nativeAlias,
-            `Native-only encrypted ${action}. This surface is restricted to currently known native child targets.`,
-            false,
-            nativeTargetList,
+            canonical,
+            `Portable plaintext collaboration ${action}. Use this canonical tool for any child backend, including Web.`,
+            true,
           ));
+          const nativeAlias = NATIVE_ENCRYPTED_ALIAS_FOR[canonical];
+          if (nativeTargetList.length > 0 && !existingNames.has(nativeAlias)) {
+            nextTools.push(collaborationMessageToolClone(
+              rawTool,
+              nativeAlias,
+              `Native-only encrypted ${action}. This surface is restricted to currently known native child targets.`,
+              false,
+              nativeTargetList,
+            ));
+          }
+          changed = true;
+          namespaceChanged = true;
+          continue;
         }
-        changed = true;
-        namespaceChanged = true;
-        continue;
+        nextTools.push(rawTool);
       }
-      nextTools.push(rawTool);
-    }
-    if (!namespaceChanged) return rawNamespace;
-    return { ...rawNamespace, tools: nextTools };
-  });
-  return changed ? { value: { ...value, tools }, changed: true } : { value, changed: false };
+      if (!namespaceChanged) return rawNamespace;
+      return { ...rawNamespace, tools: nextTools };
+    });
+    return { tools, changed };
+  };
+
+  let changed = false;
+  let tools = value.tools;
+  if (Array.isArray(value.tools)) {
+    const rewritten = rewriteTools(value.tools);
+    tools = rewritten.tools;
+    changed ||= rewritten.changed;
+  }
+
+  // Codex 0.153+ carries its Responses Lite tool surface inside a leading additional_tools input
+  // item rather than the legacy top-level tools field. Both locations must be rewritten before
+  // inference or the native backend encrypts the V2 collaboration task for a Web child.
+  let input = value.input;
+  if (Array.isArray(value.input)) {
+    input = value.input.map(rawItem => {
+      if (!isObject(rawItem)
+        || rawItem.type !== "additional_tools"
+        || !Array.isArray(rawItem.tools)) return rawItem;
+      const rewritten = rewriteTools(rawItem.tools);
+      if (!rewritten.changed) return rawItem;
+      changed = true;
+      return { ...rawItem, tools: rewritten.tools };
+    });
+  }
+
+  if (!changed) return { value, changed: false };
+  return { value: {
+    ...value,
+    ...(Array.isArray(value.tools) ? { tools } : {}),
+    ...(Array.isArray(value.input) ? { input } : {}),
+  }, changed: true };
 }
 
 function functionOutputObject(value: unknown): JsonObject | undefined {
@@ -596,6 +629,15 @@ export async function forwardNativeCodexRequest(
     const collaborationTools = endpoint === "responses"
       ? rewriteNativeCollaborationToolsForWeb(scrubbed.value, options)
       : { value: scrubbed.value, changed: false };
+    if (collaborationTools.changed) {
+      const rewritten = collaborationTools.value;
+      const responsesLite = isObject(rewritten)
+        && Array.isArray(rewritten.input)
+        && rewritten.input.some(item => isObject(item) && item.type === "additional_tools");
+      console.info(
+        `[codex-chatgpt-web] native_collaboration_schema_plaintext wire=${responsesLite ? "responses_lite" : "responses"}`,
+      );
+    }
     if (scrubbed.changed || collaborationTools.changed) {
       headers.delete("content-encoding");
       body = JSON.stringify(collaborationTools.value);

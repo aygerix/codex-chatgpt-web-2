@@ -372,6 +372,58 @@ test("canonical collaboration spawn is portable plaintext under both Web and nat
   }
 });
 
+test("rewrites Codex 0.153 Responses Lite additional_tools before native inference", async () => {
+  const tool = (name: string) => ({
+    type: "function", name, description: `${name} original`, strict: false,
+    parameters: { type: "object", properties: {
+      task_name: { type: "string" }, model: { type: "string" }, reasoning_effort: { type: "string" },
+      message: { type: "string", encrypted: true },
+    }, additionalProperties: false },
+  });
+  const body = {
+    model: "gpt-5.6-sol",
+    input: [
+      { type: "additional_tools", id: "additional_tools_live_shape", role: "developer", tools: [{
+        type: "namespace", name: "collaboration", description: "collab", tools: [tool("spawn_agent")],
+      }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Deploy one Web subagent." }] },
+    ],
+  };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST", headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const ciphertext = "gAAAAABqmtePV4JnmXa8rCIZ3slT8AIYBvnzsk0NCjpmFBD2Rfy35tmzkBBv0rel5l1WpAXJLbnCpZBIL7BWFm16pcNLX4MPdgcQ0NKN_AE5HMRPr5PjCmMJZPFj1NyhEQ";
+  let forwarded: any;
+  const response = await forwardNativeCodexRequest(request, "responses", async input => {
+    forwarded = await input.clone().json();
+    const collaboration = forwarded.input[0].tools.find((candidate: any) => candidate.name === "collaboration");
+    const spawn = collaboration.tools.find((candidate: any) => candidate.name === "spawn_agent");
+    const backendEncryptsMessage = spawn.parameters.properties.message.encrypted === true;
+    return nativeCollaborationStream({
+      type: "function_call", call_id: "live_responses_lite_spawn", namespace: "collaboration", name: "spawn_agent",
+      arguments: JSON.stringify({
+        task_name: "deployment_smoke_test", model: "chatgpt-web/extra-high", reasoning_effort: "xhigh",
+        message: backendEncryptsMessage ? ciphertext : "Calculate 17 × 19 and confirm completion.",
+      }),
+      ...(backendEncryptsMessage ? { encrypted_function_args: ["message"] } : {}),
+    });
+  }, body, { defaultSubagentModel: "chatgpt-web/extra-high" });
+
+  expect(forwarded).not.toHaveProperty("tools");
+  expect(forwarded.input[0]).toMatchObject({
+    type: "additional_tools", id: "additional_tools_live_shape", role: "developer",
+  });
+  const collaboration = forwarded.input[0].tools.find((candidate: any) => candidate.name === "collaboration");
+  const byName = new Map(collaboration.tools.map((candidate: any) => [candidate.name, candidate]));
+  expect((byName.get("spawn_agent") as any).parameters.properties.message).not.toHaveProperty("encrypted");
+  expect((byName.get("spawn_native_agent") as any).parameters.properties.message.encrypted).toBe(true);
+  const responseText = await response.text();
+  expect(responseText).toContain("Calculate 17 × 19 and confirm completion.");
+  expect(responseText).toContain('"encrypted_function_args":[]');
+  expect(responseText).not.toContain(ciphertext);
+});
+
 test("explicit Web selection under a native default stays on plaintext canonical spawn_agent", async () => {
   const body = { model: "gpt-5.6-sol", input: [] };
   const request = new Request("http://127.0.0.1:17841/v1/responses", {
