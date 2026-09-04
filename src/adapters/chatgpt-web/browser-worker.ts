@@ -3454,6 +3454,10 @@ export class ChatGptBrowserWorker {
     await this.prepareTemporaryChatSurface(page);
     const url = page.url();
     if (!detectCapabilities) return { authenticated: true, temporary: true, url };
+    // Account/model installation must inspect the same Personalized Temporary Chat surface that
+    // exposes Pro-only effort levels. Ordinary browser-only turns intentionally do not require
+    // this control; this preflight is scoped only to explicit capability detection.
+    await ensureChatGptPersonalizedConnectorAccess(page);
     const capabilities = await detectChatGptAccountCapabilities(page);
     return { authenticated: true, temporary: true, url, ...capabilities };
   }

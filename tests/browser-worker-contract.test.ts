@@ -93,6 +93,18 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   expect(selectConnector).toContain("await ensureChatGptPersonalizedConnectorAccess(");
   expect(selectConnector).toContain("async (personalizationSignal) =>");
   expect(selectConnector).toContain("await appResult.waitFor");
+  const inspectSessionExclusive = workerSource.slice(
+    workerSource.indexOf("  private async inspectSessionExclusive("),
+    workerSource.indexOf("  private async smokeTestExclusive("),
+  );
+  const capabilityPersonalization = inspectSessionExclusive.indexOf(
+    "await ensureChatGptPersonalizedConnectorAccess(page);",
+  );
+  const capabilityDetection = inspectSessionExclusive.indexOf(
+    "await detectChatGptAccountCapabilities(page);",
+  );
+  expect(capabilityPersonalization).toBeGreaterThan(-1);
+  expect(capabilityDetection).toBeGreaterThan(capabilityPersonalization);
   expect(workerSource).toContain("__CODEX_WEB_GPT_STEER_REVISION__");
   expect(workerSource).toContain("waitForSteeredAssistantTurn");
   expect(workerSource).toContain("completionSteerRevision > handledSteerRevision");
