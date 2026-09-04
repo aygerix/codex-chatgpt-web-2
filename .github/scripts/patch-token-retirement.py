@@ -17,6 +17,10 @@ p.write_text(s)
 
 tp = Path('tests/turn-broker-lifecycle.test.ts')
 ts = tp.read_text()
+old_import = 'import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";'
+new_import = 'import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSession, ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";'
+if old_import in ts:
+    ts = ts.replace(old_import, new_import, 1)
 name = 'accepted browser turn keeps its tool capability across observer failure until physical settlement'
 if name not in ts:
     ts += r'''
