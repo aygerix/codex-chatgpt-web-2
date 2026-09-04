@@ -2,6 +2,8 @@ import type { AppConfig } from "./config";
 import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebModelRoutes,
+  CHATGPT_WEB_BACKEND_MODEL,
+  CHATGPT_WEB_LUNA_BACKEND_MODEL,
   CHATGPT_WEB_MODEL_PREFIX,
   resolveChatGptWebContextLimits,
   type ChatGptWebModelRoute,
@@ -74,7 +76,15 @@ function nativeTemplateCandidate(value: unknown, requireTools: boolean): value i
 function selectNativeTemplate(models: unknown[], config: AppConfig): JsonObject {
   const requireTools = config.mode === "full";
   const candidates = models.filter(model => nativeTemplateCandidate(model, requireTools)) as JsonObject[];
-  const template = candidates[0];
+  // The native catalog is ordered by product priority. A newly launched model can therefore move
+  // ahead of Sol or Luna without becoming the backend contract for the browser routes. Keep each
+  // ChatGPT Web route based on the native row for the model that the browser adapter actually
+  // drives; otherwise a catalog launch can silently copy another model's instructions, tool mode,
+  // collaboration protocol, and ordering onto the Web aliases.
+  const backendModel = config.solAvailable
+    ? CHATGPT_WEB_BACKEND_MODEL
+    : CHATGPT_WEB_LUNA_BACKEND_MODEL;
+  const template = candidates.find(model => slug(model) === backendModel) ?? candidates[0];
   if (template) return template;
   throw new Error(
     requireTools

@@ -38,6 +38,44 @@ function source(): Record<string, unknown> {
 }
 
 describe("native /models augmentation", () => {
+  test("keeps a newly prioritized Astra row native and templates Web routes from Sol", () => {
+    const native = source();
+    const models = native.models as Array<Record<string, unknown>>;
+    models.unshift({
+      slug: "gpt-6-astra",
+      display_name: "GPT-6-Astra",
+      description: "native Astra",
+      priority: 1,
+      visibility: "list",
+      supported_in_api: true,
+      multi_agent_version: "v2",
+      base_instructions: "Astra-only instructions",
+      supported_reasoning_levels: [
+        { effort: "low", description: "Low" },
+        { effort: "ultra", description: "Pro" },
+      ],
+      tool_mode: "code_mode_only",
+    });
+    const snapshot = structuredClone(native);
+    const config = defaultConfig("full");
+    config.subagentProtocol = "native";
+    config.proAvailable = true;
+
+    const augmented = augmentNativeModelCatalog(native, config);
+    const augmentedModels = augmented.models as Array<Record<string, unknown>>;
+    const astra = augmentedModels.find(model => model.slug === "gpt-6-astra");
+    const webPro = augmentedModels.find(model => model.slug === "chatgpt-web/pro");
+
+    expect(native).toEqual(snapshot);
+    expect(astra).toEqual((snapshot.models as Array<Record<string, unknown>>)[0]);
+    expect(webPro).toMatchObject({
+      base_instructions: "native harness",
+      priority: 2,
+      supported_reasoning_levels: [{ effort: "ultra", description: "ChatGPT Web — Pro" }],
+    });
+    expect(webPro?.base_instructions).not.toBe("Astra-only instructions");
+  });
+
   test("preserves every native model in order and appends one fixed model per ChatGPT Web mode", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
@@ -274,7 +312,7 @@ describe("native /models augmentation", () => {
       .toEqual(models);
   });
 
-  test("follows official catalog order instead of preferring a named paid-tier model", () => {
+  test("prefers the matching Web backend template over an unrelated higher catalog row", () => {
     const native = source();
     const sourceModels = native.models as Array<Record<string, unknown>>;
     const sol = sourceModels[1]!;
@@ -289,7 +327,7 @@ describe("native /models augmentation", () => {
     const result = augmentNativeModelCatalog(native, defaultConfig("full"));
     const web = (result.models as Array<Record<string, unknown>>)
       .filter(model => String(model.slug).startsWith("chatgpt-web/"));
-    expect(web.every(model => model.shell_type === "terra-shell")).toBe(true);
+    expect(web.every(model => model.shell_type === "shell_command")).toBe(true);
   });
 
   test("fails closed when no official model satisfies the harness contract", () => {
