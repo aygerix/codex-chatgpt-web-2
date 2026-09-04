@@ -316,6 +316,182 @@ test("does not invent a models client version from an unrelated user agent", asy
   expect(upstreamRequest!.url).toBe("https://chatgpt.com/backend-api/codex/models");
 });
 
+
+test("native request gives a Web-default parent a plaintext canonical spawn and preserves a native encrypted alias", async () => {
+  const tool = (name: string) => ({
+    type: "function",
+    name,
+    description: `${name} original`,
+    strict: false,
+    parameters: {
+      type: "object",
+      properties: {
+        task_name: { type: "string" },
+        target: { type: "string" },
+        model: { type: "string" },
+        message: { type: "string", encrypted: true },
+      },
+      additionalProperties: false,
+    },
+  });
+  const body = {
+    model: "gpt-5.6-sol",
+    input: [],
+    tools: [{
+      type: "namespace",
+      name: "collaboration",
+      description: "collab",
+      tools: [tool("spawn_agent"), tool("send_message"), tool("followup_task")],
+    }],
+  };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let upstreamRequest: Request | undefined;
+  await forwardNativeCodexRequest(request, "responses", async input => {
+    upstreamRequest = input;
+    return nativeCollaborationStream({
+      type: "function_call", call_id: "noop", namespace: "collaboration", name: "list_agents", arguments: "{}",
+    });
+  }, body, { defaultSubagentModel: "chatgpt-web/extra-high" });
+  const forwarded = await upstreamRequest!.json() as { tools: Array<{ name: string; tools: Array<Record<string, any>> }> };
+  const collaboration = forwarded.tools.find(namespace => namespace.name === "collaboration")!;
+  const byName = new Map(collaboration.tools.map(candidate => [candidate.name, candidate]));
+  expect(byName.get("spawn_agent")!.parameters.properties.message).not.toHaveProperty("encrypted");
+  expect(byName.get("spawn_agent")!.parameters.properties).not.toHaveProperty("model");
+  expect(byName.get("spawn_agent")!.description).toContain("configured default child model");
+  expect(byName.get("spawn_native_agent")!.parameters.properties.message.encrypted).toBe(true);
+  expect(byName.get("spawn_native_agent")!.parameters.properties).toHaveProperty("model");
+  expect(byName.get("send_message")!.parameters.properties.message.encrypted).toBe(true);
+  expect(byName.has("send_web_message")).toBe(false);
+});
+
+test("native request with a native default exposes a dedicated plaintext Web spawn alias", async () => {
+  const body = {
+    model: "gpt-5.6-sol", input: [],
+    tools: [{ type: "namespace", name: "collaboration", description: "collab", tools: [{
+      type: "function", name: "spawn_agent", description: "spawn", strict: false,
+      parameters: { type: "object", properties: {
+        task_name: { type: "string" }, model: { type: "string" }, message: { type: "string", encrypted: true },
+      } },
+    }] }],
+  };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST", headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let upstreamRequest: Request | undefined;
+  await forwardNativeCodexRequest(request, "responses", async input => {
+    upstreamRequest = input;
+    return nativeCollaborationStream({ type: "function_call", call_id: "noop", namespace: "collaboration", name: "list_agents", arguments: "{}" });
+  }, body, { defaultSubagentModel: "gpt-5.6-sol" });
+  const forwarded = await upstreamRequest!.json() as any;
+  const candidates = forwarded.tools[0].tools;
+  const canonical = candidates.find((candidate: any) => candidate.name === "spawn_agent");
+  const webAlias = candidates.find((candidate: any) => candidate.name === "spawn_web_agent");
+  expect(canonical.parameters.properties.message.encrypted).toBe(true);
+  expect(webAlias.parameters.properties.message).not.toHaveProperty("encrypted");
+  expect(webAlias.description).toContain("REQUIRED");
+});
+
+test("proxy Web spawn alias is normalized to canonical plaintext Codex spawn", async () => {
+  const body = { model: "gpt-5.6-sol", input: [] };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST", headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const args = JSON.stringify({ task_name: "web_worker", model: "chatgpt-web/extra-high", message: "plain task" });
+  const response = await forwardNativeCodexRequest(request, "responses", async () => nativeCollaborationStream({
+    type: "function_call", call_id: "web_alias", namespace: "collaboration", name: "spawn_web_agent", arguments: args,
+  }), body, { defaultSubagentModel: "gpt-5.6-sol" });
+  const text = await response.text();
+  expect(text).toContain('"name":"spawn_agent"');
+  expect(text).not.toContain('spawn_web_agent');
+  expect(text).toContain('"encrypted_function_args":[]');
+  expect(text).toContain("plain task");
+});
+
+test("proxy native spawn alias maps back without stripping native encryption", async () => {
+  const body = { model: "gpt-5.6-sol", input: [] };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST", headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await forwardNativeCodexRequest(request, "responses", async () => nativeCollaborationStream({
+    type: "function_call", call_id: "native_alias", namespace: "collaboration", name: "spawn_native_agent",
+    arguments: JSON.stringify({ task_name: "native_worker", model: "gpt-5.6-sol", message: "gAAAAcipher" }),
+    encrypted_function_args: ["native-ciphertext"],
+  }), body, { defaultSubagentModel: "chatgpt-web/extra-high" });
+  const text = await response.text();
+  expect(text).toContain('"name":"spawn_agent"');
+  expect(text).not.toContain('spawn_native_agent');
+  expect(text).toContain('native-ciphertext');
+  expect(text).not.toContain('"encrypted_function_args":[]');
+});
+
+test("Web-only child history makes canonical follow-up messaging plaintext before inference", async () => {
+  const priorArgs = JSON.stringify({ task_name: "web_task", model: "chatgpt-web/extra-high", message: "initial" });
+  const tool = (name: string) => ({ type: "function", name, description: name, strict: false, parameters: {
+    type: "object", properties: { target: { type: "string" }, message: { type: "string", encrypted: true } },
+  } });
+  const body = {
+    model: "gpt-5.6-sol",
+    input: [
+      { type: "function_call", call_id: "prior", namespace: "collaboration", name: "spawn_agent", arguments: priorArgs, encrypted_function_args: [] },
+      { type: "function_call_output", call_id: "prior", output: JSON.stringify({ task_name: "web_task", nickname: "Kepler" }) },
+    ],
+    tools: [{ type: "namespace", name: "collaboration", description: "collab", tools: [tool("send_message"), tool("followup_task")] }],
+  };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST", headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  let upstreamRequest: Request | undefined;
+  await forwardNativeCodexRequest(request, "responses", async input => {
+    upstreamRequest = input;
+    return nativeCollaborationStream({ type: "function_call", call_id: "noop", namespace: "collaboration", name: "list_agents", arguments: "{}" });
+  }, body, { defaultSubagentModel: "chatgpt-web/extra-high" });
+  const forwarded = await upstreamRequest!.json() as any;
+  const byName = new Map(forwarded.tools[0].tools.map((candidate: any) => [candidate.name, candidate]));
+  expect((byName.get("send_message") as any).parameters.properties.message).not.toHaveProperty("encrypted");
+  expect((byName.get("followup_task") as any).parameters.properties.message).not.toHaveProperty("encrypted");
+  expect((byName.get("send_message") as any).parameters.properties.target.enum).toEqual(["Kepler", "web_task"]);
+  expect((byName.get("send_native_message") as any).parameters.properties.message.encrypted).toBe(true);
+  expect((byName.get("followup_native_task") as any).parameters.properties.message.encrypted).toBe(true);
+});
+
+test("mixed native and Web children keep encrypted canonical messaging and add a target-constrained Web alias", async () => {
+  const body = {
+    model: "gpt-5.6-sol",
+    input: [
+      { type: "function_call", call_id: "web", namespace: "collaboration", name: "spawn_agent", arguments: JSON.stringify({ task_name: "web_task", model: "chatgpt-web/extra-high", message: "w" }), encrypted_function_args: [] },
+      { type: "function_call_output", call_id: "web", output: JSON.stringify({ task_name: "web_task", nickname: "Kepler" }) },
+      { type: "function_call", call_id: "native", namespace: "collaboration", name: "spawn_agent", arguments: JSON.stringify({ task_name: "native_task", model: "gpt-5.6-sol", message: "gAAAAcipher" }) },
+    ],
+    tools: [{ type: "namespace", name: "collaboration", description: "collab", tools: [{
+      type: "function", name: "send_message", description: "send", strict: false, parameters: { type: "object", properties: {
+        target: { type: "string" }, message: { type: "string", encrypted: true },
+      } },
+    }] }],
+  };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST", headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  let upstreamRequest: Request | undefined;
+  await forwardNativeCodexRequest(request, "responses", async input => {
+    upstreamRequest = input;
+    return nativeCollaborationStream({ type: "function_call", call_id: "noop", namespace: "collaboration", name: "list_agents", arguments: "{}" });
+  }, body, { defaultSubagentModel: "chatgpt-web/extra-high" });
+  const forwarded = await upstreamRequest!.json() as any;
+  const candidates = forwarded.tools[0].tools;
+  const canonical = candidates.find((candidate: any) => candidate.name === "send_message");
+  const webAlias = candidates.find((candidate: any) => candidate.name === "send_web_message");
+  expect(canonical.parameters.properties.message.encrypted).toBe(true);
+  expect(webAlias.parameters.properties.message).not.toHaveProperty("encrypted");
+  expect(webAlias.parameters.properties.target.enum).toEqual(["Kepler", "web_task"]);
+});
+
 /** A reset after `data: [DONE]` is a completed stream, while a reset before it is a truncation. */
 function nativeRequest(): Request {
   return new Request("http://127.0.0.1:17841/v1/responses", {
@@ -473,7 +649,7 @@ test("configured Web default marks a native V2 spawn that omits model", async ()
   expect(await response.text()).toContain('"encrypted_function_args":[]');
 });
 
-test("native V2 native-model spawn preserves encrypted delivery", async () => {
+test("native V2 native-model spawn preserves encrypted delivery on the native-default canonical surface", async () => {
   const body = { model: "gpt-5.6-sol", input: [] };
   const request = new Request("http://127.0.0.1:17841/v1/responses", {
     method: "POST",
@@ -489,7 +665,7 @@ test("native V2 native-model spawn preserves encrypted delivery", async () => {
       arguments: JSON.stringify({ message: "work", task_name: "worker", model: "gpt-5.6-sol" }),
       encrypted_function_args: ["native-ciphertext"],
     })
-  ), body, { defaultSubagentModel: "chatgpt-web/extra-high" });
+  ), body, { defaultSubagentModel: "gpt-5.6-sol" });
   const text = await response.text();
   expect(text).toContain('native-ciphertext');
   expect(text).not.toContain('"encrypted_function_args":[]');
