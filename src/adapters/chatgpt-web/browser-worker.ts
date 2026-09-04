@@ -510,6 +510,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
   abortSignal: AbortSignal,
   captureDiagnostic?: (checkpoint: string) => Promise<void>,
   proveConfiguredConnectorAccess?: (signal?: AbortSignal) => Promise<boolean>,
+  connectorCatalogStaleError?: () => Error,
 ): Promise<ChatGptPersonalizationPreflight> {
   const capture = async (checkpoint: string): Promise<void> => {
     if (!captureDiagnostic) return;
@@ -572,6 +573,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
           "ChatGPT personalization changed but connector access was not proven and the original state could not be restored",
         );
       }
+      if (connectorCatalogStaleError) throw connectorCatalogStaleError();
       throw chatGptConnectorUnavailableError(
         "The configured ChatGPT connector remained unavailable after the structural personalization state changed",
       );
@@ -646,6 +648,7 @@ export async function ensureChatGptPersonalizedConnectorAccess(
   captureDiagnostic?: (checkpoint: string) => Promise<void>,
   proveConfiguredConnectorAccess?: (signal?: AbortSignal) => Promise<boolean>,
   abortSignal?: AbortSignal,
+  connectorCatalogStaleError?: () => Error,
 ): Promise<ChatGptPersonalizationPreflight> {
   const deadline = Date.now() + CHATGPT_PERSONALIZATION_PREFLIGHT_TIMEOUT_MS;
   const deadlineController = new AbortController();
@@ -664,6 +667,7 @@ export async function ensureChatGptPersonalizedConnectorAccess(
       operationSignal,
       captureDiagnostic,
       proveConfiguredConnectorAccess,
+      connectorCatalogStaleError,
     );
   } catch (error) {
     if (error instanceof ChatGptPersistentBrowserStateError) throw error;
@@ -3260,6 +3264,12 @@ export class ChatGptBrowserWorker {
         return proofResult === true;
       },
       abortSignal,
+      catalogRefreshAvailable
+        ? () => new ChatGptConnectorCatalogStaleError(
+            this.config.appName,
+            attemptBudget.triggerAttempts,
+          )
+        : undefined,
     );
     try {
       composer = await this.activeComposer(page, 30_000, abortSignal);

@@ -198,6 +198,79 @@ test("a localized Unpersonalized Temporary Chat toggles the structural state and
   expect(personalized).toBeTrue();
 });
 
+test("a localized connector hydration miss restores personalization before requesting one catalog refresh", async () => {
+  let menuOpen = false;
+  let personalized = false;
+  let proofCalls = 0;
+  const choiceClicks: number[] = [];
+  const diagnostics: string[] = [];
+  const absent = visibleLocator(() => 0);
+  const choices = {
+    filter: () => choices,
+    count: async () => 2,
+    nth: (index: number) => ({
+      getAttribute: async (name: string) => {
+        if (name === "aria-checked") return String(index === (personalized ? 1 : 0));
+        if (name === "data-state") return index === (personalized ? 1 : 0) ? "checked" : "unchecked";
+        return null;
+      },
+      click: async () => {
+        choiceClicks.push(index);
+        personalized = index === 1;
+        menuOpen = false;
+      },
+    }),
+  };
+  const menu = {
+    locator: () => choices,
+    waitFor: async ({ state }: { state: string }) => {
+      expect(menuOpen).toBe(state === "visible");
+    },
+  };
+  const control = {
+    waitFor: async () => {},
+    click: async () => { menuOpen = true; },
+    getAttribute: async () => "stale-catalog-personalization-menu",
+  };
+  const controls = {
+    filter: () => controls,
+    count: async () => 1,
+    first: () => control,
+  };
+  const page = {
+    getByRole: () => absent,
+    locator: (selector: string) => {
+      if (selector.includes("aria-haspopup")) return controls;
+      if (selector === "body") return {
+        press: async (key: string) => {
+          expect(key).toBe("Escape");
+          menuOpen = false;
+        },
+      };
+      expect(selector).toBe('[id="stale-catalog-personalization-menu"]');
+      return menu;
+    },
+  } as any;
+  const staleCatalog = new Error("refresh the stale connector catalog");
+  staleCatalog.name = "ChatGptConnectorCatalogStaleError";
+
+  await expect(ensureChatGptPersonalizedConnectorAccess(
+    page,
+    async checkpoint => { diagnostics.push(checkpoint); },
+    async () => {
+      proofCalls += 1;
+      return false;
+    },
+    undefined,
+    () => staleCatalog,
+  )).rejects.toBe(staleCatalog);
+  expect(proofCalls).toBe(2);
+  expect(choiceClicks).toEqual([1, 0]);
+  expect(personalized).toBeFalse();
+  expect(menuOpen).toBeFalse();
+  expect(diagnostics).toEqual(["personalization-unpersonalized"]);
+});
+
 test("a localized preflight waits for its semantic control to hydrate without assuming a button tag", async () => {
   const controller = new AbortController();
   let controlReady = false;
