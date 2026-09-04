@@ -8,6 +8,7 @@ import {
   codexUserRevisionText,
   consumeInjectedCodexSteerReplay,
   decodeRustDebugString,
+  injectedCodexSteerReplayState,
   markInjectedCodexSteersSettled,
   parseCodexSteerSubmission,
   recordInjectedCodexSteer,
@@ -52,13 +53,17 @@ test("canonical Responses user revisions use the same text representation as ste
   expect(codexUserRevisionText([{ type: "input_image", image_url: "data:image/png;base64,AA==" }])).toBeUndefined();
 });
 
-test("a mirrored steer is suppressed only after its browser turn physically settles", () => {
+test("a mirrored steer stays active for canonical tool-result rounds and is consumed only after physical settlement", () => {
   resetInjectedCodexSteerReplayRegistryForTests();
   const steer = { logId: 20, threadId, turnId, text: "new direction" };
   recordInjectedCodexSteer(steer);
+  expect(injectedCodexSteerReplayState(threadId, turnId, steer.text)).toBe("active");
   expect(consumeInjectedCodexSteerReplay(threadId, turnId, steer.text)).toBeFalse();
+  expect(injectedCodexSteerReplayState(threadId, turnId, steer.text)).toBe("active");
   markInjectedCodexSteersSettled(threadId, turnId);
+  expect(injectedCodexSteerReplayState(threadId, turnId, steer.text)).toBe("settled");
   expect(consumeInjectedCodexSteerReplay(threadId, turnId, steer.text)).toBeTrue();
+  expect(injectedCodexSteerReplayState(threadId, turnId, steer.text)).toBeUndefined();
   expect(consumeInjectedCodexSteerReplay(threadId, turnId, steer.text)).toBeFalse();
 });
 

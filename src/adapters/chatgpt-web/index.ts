@@ -42,6 +42,7 @@ import {
   codexSteeringLogWatcher,
   codexUserRevisionText,
   consumeInjectedCodexSteerReplay,
+  injectedCodexSteerReplayState,
   markInjectedCodexSteersSettled,
   recordInjectedCodexSteer,
 } from "./codex-steering-watch";
@@ -573,21 +574,46 @@ export function createChatGptWebAdapter(
           ? { ...configuredCapabilities, localToolsEnabled: false }
           : configuredCapabilities;
         const immediateSteerIdentity = extractChatGptTurnIdentity(parsed);
-        if (!parsed._compactionRequest && immediateSteerIdentity.threadId && immediateSteerIdentity.turnId) {
-          const revisionText = codexUserRevisionText(extractChatGptTurnUserRevision(parsed));
-          if (revisionText && consumeInjectedCodexSteerReplay(
+        const immediateSteerRevisionText = !parsed._compactionRequest
+          && immediateSteerIdentity.threadId
+          && immediateSteerIdentity.turnId
+          ? codexUserRevisionText(extractChatGptTurnUserRevision(parsed))
+          : undefined;
+        const mirroredSteerReplayState = (): ReturnType<typeof injectedCodexSteerReplayState> => (
+          immediateSteerRevisionText
+            && immediateSteerIdentity.threadId
+            && immediateSteerIdentity.turnId
+            ? injectedCodexSteerReplayState(
+              immediateSteerIdentity.threadId,
+              immediateSteerIdentity.turnId,
+              immediateSteerRevisionText,
+            )
+            : undefined
+        );
+        const consumeSettledMirroredSteerReplay = (): boolean => Boolean(
+          immediateSteerRevisionText
+          && immediateSteerIdentity.threadId
+          && immediateSteerIdentity.turnId
+          && consumeInjectedCodexSteerReplay(
             immediateSteerIdentity.threadId,
             immediateSteerIdentity.turnId,
-            revisionText,
-          )) {
-            console.info(`[chatgpt-web] consumed canonical Codex replay for an already mirrored steer (textChars=${revisionText.length})`);
-            emitBrowserCompletion(
-              { type: "final", answer: "" },
-              estimateChatGptWebUsage(currentUsageInput(parsed), { answer: "", reasoning: [] }, turnCapabilities),
-              emit,
-            );
-            return;
-          }
+            immediateSteerRevisionText,
+          )
+        );
+        const emitSettledMirroredSteerReplay = (): void => {
+          console.info(
+            `[chatgpt-web] consumed canonical Codex replay for an already mirrored steer`
+            + ` (textChars=${immediateSteerRevisionText?.length ?? 0})`,
+          );
+          emitBrowserCompletion(
+            { type: "final", answer: "" },
+            estimateChatGptWebUsage(currentUsageInput(parsed), { answer: "", reasoning: [] }, turnCapabilities),
+            emit,
+          );
+        };
+        if (mirroredSteerReplayState() === "settled" && consumeSettledMirroredSteerReplay()) {
+          emitSettledMirroredSteerReplay();
+          return;
         }
         const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
         const structuredOutputValidator = parsed._compactionRequest
@@ -819,21 +845,62 @@ export function createChatGptWebAdapter(
         const ownerKey = `${executionNamespace}:${chatGptThreadOwnershipKey(parsed)}`;
         const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
         const identity = extractChatGptTurnIdentity(parsed);
-        const steeringConversationKey = identity.turnId
-          ? await chatGptTurnSessions.handoffActiveOwnerForSteering(
-            ownerKey,
-            identity.turnId,
+        let session: ChatGptTurnSession | undefined;
+        let ownedExecutionKey = executionKey;
+        let steeringConversationKey: string | undefined;
+
+        const replayStateAtAcquire = mirroredSteerReplayState();
+        if (replayStateAtAcquire === "settled" && consumeSettledMirroredSteerReplay()) {
+          emitSettledMirroredSteerReplay();
+          return;
+        }
+        if (replayStateAtAcquire === "active" && identity.turnId) {
+          const activeOwner = chatGptTurnSessions.findActiveOwner(ownerKey, identity.turnId);
+          if (activeOwner) {
+            session = activeOwner.session;
+            ownedExecutionKey = activeOwner.key;
+            console.info(
+              `[chatgpt-web] attached canonical Codex replay to active mirrored steer`
+              + ` (trace=${session.traceId ?? "unknown"}, textChars=${immediateSteerRevisionText?.length ?? 0})`,
+            );
+          } else {
+            // Physical settlement and registry settlement are separate microtasks. Re-check once: if
+            // the browser just finished, consume the settled replay; if it still claims active, do
+            // not start a duplicate browser while ownership is in transition.
+            await Promise.resolve();
+            if (mirroredSteerReplayState() === "settled" && consumeSettledMirroredSteerReplay()) {
+              emitSettledMirroredSteerReplay();
+              return;
+            }
+            throw new ChatGptWebAdapterError(
+              "Canonical Codex steer replay arrived while its already-mirrored browser ownership was transitioning; retry this native round without starting another browser.",
+              {
+                status: 409,
+                errorType: "invalid_request_error",
+                code: "steer_replay_owner_transition",
+                retryable: true,
+              },
+            );
+          }
+        }
+
+        if (!session) {
+          steeringConversationKey = identity.turnId
+            ? await chatGptTurnSessions.handoffActiveOwnerForSteering(
+              ownerKey,
+              identity.turnId,
+              executionKey,
+              incoming.abortSignal,
+            )
+            : undefined;
+          session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
             executionKey,
+            ownerKey,
+            () => startRuntime(parsed, environment, traceId, turnCapabilities, steeringConversationKey),
+            traceId,
             incoming.abortSignal,
-          )
-          : undefined;
-        const session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
-          executionKey,
-          ownerKey,
-          () => startRuntime(parsed, environment, traceId, turnCapabilities, steeringConversationKey),
-          traceId,
-          incoming.abortSignal,
-        );
+          );
+        }
         const roundKey = chatGptTurnRoundKey(parsed);
         const emitRoundEvents = (events: readonly AdapterEvent[]): void => {
           // Journal the complete synchronous event batch before touching the HTTP observer. If the
@@ -1077,7 +1144,7 @@ export function createChatGptWebAdapter(
             // instead of replaying one rejected browser outcome for the registry's full TTL.
             session.cancel();
           } else {
-            chatGptTurnSessions.retire(executionKey, session);
+            chatGptTurnSessions.retire(ownedExecutionKey, session);
           }
           // Do not revoke the turn capability here. A Responses/SSE observer can fail or reconnect
           // while the already-accepted browser turn is still alive and may still invoke Codex Native.

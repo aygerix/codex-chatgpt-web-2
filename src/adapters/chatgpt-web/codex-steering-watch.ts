@@ -34,6 +34,8 @@ interface InjectedSteerRecord extends CodexSteerSubmission {
   settled: boolean;
 }
 
+export type InjectedCodexSteerReplayState = "active" | "settled";
+
 function defaultCodexLogDatabasePath(): string {
   const configured = process.env.CODEX_HOME?.trim();
   return join(resolve(configured || join(homedir(), ".codex")), "logs_2.sqlite");
@@ -159,6 +161,16 @@ class InjectedSteerReplayRegistry {
     }
   }
 
+  state(threadId: string, turnId: string, text: string, now = Date.now()): InjectedCodexSteerReplayState | undefined {
+    this.prune(now);
+    for (let index = this.records.length - 1; index >= 0; index -= 1) {
+      const record = this.records[index]!;
+      if (record.threadId !== threadId || record.turnId !== turnId || record.text !== text) continue;
+      return record.settled ? "settled" : "active";
+    }
+    return undefined;
+  }
+
   consumeSettledThrough(threadId: string, turnId: string, text: string, now = Date.now()): boolean {
     this.prune(now);
     let matchIndex = -1;
@@ -203,6 +215,14 @@ export function recordInjectedCodexSteer(submission: CodexSteerSubmission): void
 
 export function markInjectedCodexSteersSettled(threadId: string, turnId: string): void {
   injectedSteerReplayRegistry.settleTurn(threadId, turnId);
+}
+
+export function injectedCodexSteerReplayState(
+  threadId: string,
+  turnId: string,
+  text: string,
+): InjectedCodexSteerReplayState | undefined {
+  return injectedSteerReplayRegistry.state(threadId, turnId, text);
 }
 
 export function consumeInjectedCodexSteerReplay(threadId: string, turnId: string, text: string): boolean {

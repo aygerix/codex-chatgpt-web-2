@@ -594,6 +594,22 @@ export class ChatGptTurnSessions {
     return retainedKey;
   }
 
+  findActiveOwner(ownerKey: string, turnId: string): { key: string; session: ChatGptTurnSession } | undefined {
+    const matches = [...this.entries].filter(([, session]) => (
+      session.ownerKey === ownerKey
+      && session.runtime.turnId === turnId
+      && session.isActive()
+    ));
+    if (matches.length > 1) {
+      throw new Error(`ChatGPT thread has ${matches.length} active browser owners for one native turn`);
+    }
+    const match = matches[0];
+    if (!match) return undefined;
+    const [key, session] = match;
+    session.touch();
+    return { key, session };
+  }
+
   find(key: string): ChatGptTurnSession | undefined {
     const session = this.entries.get(key);
     session?.touch();

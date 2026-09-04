@@ -48,3 +48,18 @@ test("provisional steer reconciliation trusts the accepted steer epoch while sta
   expect(source).toContain('if (!provisionalSteerBinding)');
   expect(source).toContain('const identity = provisionalSteerBinding');
 });
+
+
+test("canonical replay of an active mirrored steer reuses its browser owner before any handoff", () => {
+  const source = readFileSync("src/adapters/chatgpt-web/index.ts", "utf8");
+  const state = source.indexOf('replayStateAtAcquire === "active"');
+  const reuse = source.indexOf("chatGptTurnSessions.findActiveOwner(ownerKey, identity.turnId)", state);
+  const attach = source.indexOf("attached canonical Codex replay to active mirrored steer", reuse);
+  const handoff = source.indexOf("chatGptTurnSessions.handoffActiveOwnerForSteering(", state);
+  expect(state).toBeGreaterThan(-1);
+  expect(reuse).toBeGreaterThan(state);
+  expect(attach).toBeGreaterThan(reuse);
+  expect(handoff).toBeGreaterThan(attach);
+  expect(source).toContain("chatGptTurnSessions.retire(ownedExecutionKey, session)");
+  expect(source).toContain("steer_replay_owner_transition");
+});
