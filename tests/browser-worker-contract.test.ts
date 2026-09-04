@@ -127,6 +127,42 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   );
 });
 
+test("submission acceptance recovers a stalled DOM probe without losing authoritative tool progress", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const acceptance = workerSource.slice(
+    workerSource.indexOf("  private async waitForSubmissionAccepted("),
+    workerSource.indexOf("  private async submissionDomState("),
+  );
+  const toolAcceptance = acceptance.indexOf("progress.lastToolBatchRevision > initialToolBatchRevision");
+  const boundaryRead = acceptance.indexOf("this.currentSubmissionAnswerText(");
+  expect(toolAcceptance).toBeGreaterThan(-1);
+  expect(boundaryRead).toBeGreaterThan(toolAcceptance);
+  expect(acceptance).toContain('kind: "dom_timeout"');
+  expect(acceptance).toContain("error instanceof ChatGptBrowserObservationTimeoutError");
+  expect(acceptance).toContain("latestProgress.lastToolBatchRevision > initialToolBatchRevision");
+  expect(acceptance).toContain("consecutiveObservationTimeouts > MAX_CHATGPT_BROWSER_PAGE_REBINDS");
+  expect(acceptance).toContain("activePage = await recoverObservation(");
+  expect(acceptance).toContain("timed-out page.evaluate may still be pending");
+
+  const sendAttachedPrompt = workerSource.slice(
+    workerSource.indexOf("  private async sendAttachedPrompt("),
+    workerSource.indexOf("  private async waitForMultipartAcknowledgement("),
+  );
+  expect(sendAttachedPrompt).toContain("recoverObservation?: (");
+  expect(sendAttachedPrompt).toContain("recoverObservation,\n    );");
+
+  const runBrowserTurn = workerSource.slice(workerSource.indexOf("  private async runBrowserTurn("));
+  const recoveryHelper = runBrowserTurn.slice(
+    runBrowserTurn.indexOf("const recoverSubmissionObservation = async ("),
+    runBrowserTurn.indexOf('await diagnostics.capture(page, "browser-page-acquired")'),
+  );
+  expect(recoveryHelper).toContain("await rebindLauncherPage(attempt, cause)");
+  expect(recoveryHelper).toContain("baseline.userTurns = page.locator(CHATGPT_USER_TURN_SELECTOR)");
+  expect(recoveryHelper).toContain("baseline.responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR)");
+  expect(recoveryHelper).toContain("baseline.domCache = {}");
+  expect(runBrowserTurn.split("recoverSubmissionObservation,").length - 1).toBe(2);
+});
+
 test("conversation turn identity survives ChatGPT DOM virtualization", () => {
   expect(chatGptNewTurnIdentity(
     ["conversation-turn-1", "conversation-turn-2", "conversation-turn-3"],

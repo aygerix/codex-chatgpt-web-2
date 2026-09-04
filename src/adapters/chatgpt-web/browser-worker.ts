@@ -2673,44 +2673,95 @@ export class ChatGptBrowserWorker {
     externalProgress?: ChatGptTurnProgressReader,
     initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0,
     completionTracker?: ChatGptCompletionTracker,
+    recoverObservation?: (
+      baseline: ChatGptSubmissionBaseline,
+      attempt: number,
+      cause: ChatGptBrowserObservationTimeoutError,
+    ) => Promise<Page>,
   ): Promise<ChatGptSubmissionEvidence> {
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    let activePage = page;
+    let consecutiveObservationTimeouts = 0;
+    const observeDom = async (): Promise<
+      | { kind: "dom"; value: ChatGptSubmissionEvidence | undefined }
+      | { kind: "dom_timeout"; error: ChatGptBrowserObservationTimeoutError }
+    > => {
+      try {
+        return { kind: "dom", value: await this.currentSubmissionEvidence(activePage, baseline, signal) };
+      } catch (error) {
+        if (!(error instanceof ChatGptBrowserObservationTimeoutError)) throw error;
+        return { kind: "dom_timeout", error };
+      }
+    };
     for (;;) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       const progress = externalProgress?.snapshot();
+      // A new broker tool batch is semantic proof that ChatGPT accepted this exact prompt. Check it
+      // before touching the DOM again: a renderer probe that is already wedged must never outrun
+      // stronger cross-process acceptance evidence and turn a live tool call into an ambiguous send.
+      if (progress && progress.lastToolBatchRevision > initialToolBatchRevision) return "mcp_tool_call";
       if (progress
         && externalProgress
         && completionTracker?.needsToolBatchObservation(progress.lastToolBatchRevision)) {
-        const boundaryText = await this.currentSubmissionAnswerText(page, baseline, signal);
+        const boundaryText = await this.currentSubmissionAnswerText(activePage, baseline, signal);
         completionTracker.observeToolBatch(progress.lastToolBatchRevision, boundaryText);
         await externalProgress.acknowledgeToolBatch(progress.lastToolBatchRevision);
       }
-      if (progress && progress.lastToolBatchRevision > initialToolBatchRevision) return "mcp_tool_call";
-      await throwIfChatGptSessionFailureAlert(page);
+      await throwIfChatGptSessionFailureAlert(activePage);
       await throwIfChatGptTerminalErrorAlert(baseline.responseTurns.last());
-      let evidence: ChatGptSubmissionEvidence | undefined;
+      let observed:
+        | { kind: "dom"; value: ChatGptSubmissionEvidence | undefined }
+        | { kind: "dom_timeout"; error: ChatGptBrowserObservationTimeoutError }
+        | { kind: "external" };
       if (externalProgress) {
         const progressWaitAbort = new AbortController();
         const progressSignal = signal
           ? AbortSignal.any([progressWaitAbort.signal, signal])
           : progressWaitAbort.signal;
         try {
-          const observed = await withBrowserTurnAbort(Promise.race([
-            this.currentSubmissionEvidence(page, baseline, signal).then(value => ({ kind: "dom" as const, value })),
+          observed = await withBrowserTurnAbort(Promise.race([
+            observeDom(),
             externalProgress.waitForChange(progress?.revision ?? 0, progressSignal)
               .then(() => ({ kind: "external" as const })),
           ]), signal);
-          if (observed.kind === "external") continue;
-          evidence = observed.value;
         } finally {
           progressWaitAbort.abort();
         }
       } else {
-        evidence = await this.currentSubmissionEvidence(page, baseline, signal);
+        observed = await observeDom();
       }
-      if (evidence) return evidence;
+      if (observed.kind === "external") continue;
+      if (observed.kind === "dom_timeout") {
+        // The timeout only says this CDP connection failed to answer one bounded observation. It
+        // says nothing about whether the already-activated Send was accepted. Re-check broker
+        // progress first because the tool call may have landed in the small race between the DOM
+        // timeout and this handler.
+        const latestProgress = externalProgress?.snapshot();
+        if (latestProgress && latestProgress.lastToolBatchRevision > initialToolBatchRevision) {
+          return "mcp_tool_call";
+        }
+        consecutiveObservationTimeouts += 1;
+        if (!recoverObservation) throw observed.error;
+        if (consecutiveObservationTimeouts > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
+          throw new Error(
+            `ChatGPT browser DOM remained unresponsive while proving submission acceptance after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
+            { cause: observed.error },
+          );
+        }
+        // Rebind the same launcher-owned tab. Closing the stale CDP connection is important: the
+        // timed-out page.evaluate may still be pending underneath the timeout race, so issuing more
+        // reads on that connection can pile up behind a renderer that is already wedged.
+        activePage = await recoverObservation(
+          baseline,
+          consecutiveObservationTimeouts,
+          observed.error,
+        );
+        continue;
+      }
+      consecutiveObservationTimeouts = 0;
+      if (observed.value) return observed.value;
       await this.waitForTurnDomOrExternalProgress(
-        page,
+        activePage,
         progress?.revision ?? 0,
         externalProgress,
         signal,
@@ -3349,6 +3400,11 @@ export class ChatGptBrowserWorker {
     baseline: ChatGptSubmissionBaseline,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     abortSignal?: AbortSignal,
+    recoverObservation?: (
+      baseline: ChatGptSubmissionBaseline,
+      attempt: number,
+      cause: ChatGptBrowserObservationTimeoutError,
+    ) => Promise<Page>,
     externalProgress?: ChatGptTurnProgressReader,
     submissionLifecycle?: Pick<BrowserTurn, "onSendActivated" | "onSubmitted">,
     completionTracker?: ChatGptCompletionTracker,
@@ -3387,6 +3443,7 @@ export class ChatGptBrowserWorker {
       externalProgress,
       initialToolBatchRevision,
       completionTracker,
+      recoverObservation,
     );
     submissionLifecycle?.onSubmitted?.();
     return evidence;
@@ -4398,6 +4455,21 @@ export class ChatGptBrowserWorker {
           `[chatgpt-web] browser turn ${turn.traceId} rebound its existing launcher page after a stalled DOM probe`,
         );
       };
+      const recoverSubmissionObservation = async (
+        baseline: ChatGptSubmissionBaseline,
+        attempt: number,
+        cause: ChatGptBrowserObservationTimeoutError,
+      ): Promise<Page> => {
+        await rebindLauncherPage(attempt, cause);
+        // Rebuild every page-bound locator and discard the old observer revision cache. The
+        // semantic baseline counts/identities stay intact because this is the same browser tab and
+        // the same already-activated submission, not a replay.
+        baseline.userTurns = page.locator(CHATGPT_USER_TURN_SELECTOR);
+        baseline.responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
+        baseline.domCache = {};
+        await diagnostics.capture(page, "submission-page-rebound-after-observation-timeout");
+        return page;
+      };
       await diagnostics.capture(page, "browser-page-acquired");
       console.info(
         `[chatgpt-web] browser turn ${turn.traceId} opened (transport=${prepared.multipart ? `multipart-${prepared.multipart.parts.length}` : "inline"}, maxMessageChars=${maxMessageChars}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length}, compactionTrimmedMessages=${prepared.trimmedCompactionMessages ?? 0})`,
@@ -4460,6 +4532,7 @@ export class ChatGptBrowserWorker {
               stageBaseline,
               checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+              recoverSubmissionObservation,
             ),
           );
           const responseTurn = await this.waitForNewAssistantTurn(
@@ -4578,6 +4651,7 @@ export class ChatGptBrowserWorker {
           submissionBaseline,
           checkpoint => diagnostics.capture(page, checkpoint),
           turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+          recoverSubmissionObservation,
           turn.externalProgress,
           turn,
           completionTracker,
