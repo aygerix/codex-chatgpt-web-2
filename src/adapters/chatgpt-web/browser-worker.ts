@@ -1184,11 +1184,13 @@ export function chatGptTurnIsComplete(state: {
   currentText: string;
   currentHtml?: string;
   completionActionVisible: boolean;
+  /** Explicit false is strong fallback evidence that ChatGPT has retired its streaming-status UI. */
+  streamingStatusVisible?: boolean;
 }): boolean {
   return state.responsePresent
     && !state.running
     && state.currentText.length > 0
-    && state.completionActionVisible;
+    && (state.completionActionVisible || state.streamingStatusVisible === false);
 }
 
 export type ChatGptSubmissionEvidence = "user_turn" | "assistant_turn" | "generation_running" | "mcp_tool_call";
@@ -1382,6 +1384,7 @@ export class ChatGptTurnDomHealthTracker {
     running: boolean;
     currentText: string;
     completionActionVisible: boolean;
+    streamingStatusVisible?: boolean;
     externalProgressLive?: boolean;
   }, now = Date.now()): string | undefined {
     if (state.responsePresent) this.sawResponse = true;
@@ -1421,7 +1424,11 @@ export class ChatGptTurnDomHealthTracker {
     const missingCompletionAction = state.responsePresent
       && !state.running
       && state.currentText.length > 0
-      && !state.completionActionVisible;
+      && !state.completionActionVisible
+      // Current ChatGPT can omit the Copy action entirely. A retired streaming-status surface is
+      // the structural fallback completion signal; only complain when streaming UI is still live
+      // or the caller did not provide that stronger observation.
+      && state.streamingStatusVisible !== false;
     if (!missingCompletionAction) {
       this.missingCompletionAction = undefined;
     } else if (this.missingCompletionAction?.text !== state.currentText) {
@@ -1523,6 +1530,7 @@ interface ChatGptResponseDomSnapshot {
   fullHtml: string;
   markdownSegments: ChatGptMarkdownSegment[];
   completionActionVisible: boolean;
+  streamingStatusVisible: boolean;
   stoppedThinkingVisible: boolean;
   traceBlocks: ChatGptVisibleTraceBlock[];
 }
@@ -1540,6 +1548,7 @@ const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
   fullHtml: "",
   markdownSegments: [],
   completionActionVisible: false,
+  streamingStatusVisible: false,
   stoppedThinkingVisible: false,
   traceBlocks: [],
 });
@@ -3901,6 +3910,7 @@ export class ChatGptBrowserWorker {
           fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
           markdownSegments,
           completionActionVisible: completionAction !== undefined,
+          streamingStatusVisible: streamingStatusContainers.length > 0,
           stoppedThinkingVisible,
           traceBlocks,
         },
@@ -4662,6 +4672,7 @@ export class ChatGptBrowserWorker {
             running,
             currentText: snapshot.visibleText,
             completionActionVisible: snapshot.completionActionVisible,
+            streamingStatusVisible: snapshot.streamingStatusVisible,
             externalProgressLive,
           });
           if (domError) throw new Error(domError);
@@ -4671,6 +4682,7 @@ export class ChatGptBrowserWorker {
             currentText: snapshot.visibleText,
             currentHtml: snapshot.fullHtml,
             completionActionVisible: snapshot.completionActionVisible,
+            streamingStatusVisible: snapshot.streamingStatusVisible,
             externalToolCallsInFlight,
           });
           if (!completionReady) completionFenceRevision = undefined;
@@ -4753,6 +4765,7 @@ export class ChatGptBrowserWorker {
             running,
             currentText: "",
             completionActionVisible: false,
+            streamingStatusVisible: false,
             externalProgressLive,
           });
           if (domError) throw new Error(domError);
