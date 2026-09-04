@@ -131,6 +131,34 @@ if old_expect not in s:
 s = s.replace(old_expect, new_expect, 1)
 p.write_text(s)
 
+# Retained compaction fixtures must register the source browser under the same turn-scoped key that
+# production Full-mode turns now use. The compaction request itself locates that source via its
+# authenticated pre-compaction turn id.
+p = Path('tests/retained-compaction.test.ts')
+s = p.read_text()
+s = s.replace(
+'''import {
+  chatGptConversationKey,
+  retainedConversationResumeRequest,
+} from "../src/adapters/chatgpt-web/conversation-key";''',
+'''import {
+  chatGptCompactionSourceConversationKey,
+  chatGptConversationKey,
+  retainedConversationResumeRequest,
+} from "../src/adapters/chatgpt-web/conversation-key";''',
+1,
+)
+s = s.replace(
+    'chatGptConversationKey(sourceRequest, namespace)!',
+    'chatGptConversationKey(sourceRequest, namespace, { turnScoped: true })!',
+)
+s = s.replace(
+    '  expect(chatGptConversationKey(compact, namespace)).toBe(conversationKey);',
+    '  expect(chatGptCompactionSourceConversationKey(compact, namespace)).toBe(conversationKey);',
+    1,
+)
+p.write_text(s)
+
 # Focused capability-epoch unit tests.
 t = Path('tests/chatgpt-goal-capability-epoch.test.ts')
 t.write_text(r'''import { expect, test } from "bun:test";
