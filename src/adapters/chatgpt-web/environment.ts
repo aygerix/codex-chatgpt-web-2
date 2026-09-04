@@ -81,6 +81,11 @@ function itemTurnId(value: unknown): string | undefined {
   return typeof turnId === "string" ? turnId : undefined;
 }
 
+function isInstructionItem(value: Record<string, unknown> | undefined): value is Record<string, unknown> {
+  return value?.type === "agent_message"
+    || (value?.type === "message" && value.role === "user");
+}
+
 function rawMessageText(value: Record<string, unknown>): string {
   if (typeof value.content === "string") return value.content;
   if (!Array.isArray(value.content)) return "";
@@ -134,8 +139,22 @@ function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, expectedTurnI
   const input = Array.isArray(body?.input) ? body.input : [];
   for (let index = input.length - 1; index >= 0; index -= 1) {
     const item = record(input[index]);
-    if (item?.type !== "message" || item.role !== "user") continue;
+    if (!isInstructionItem(item)) continue;
     const messageTurnId = itemTurnId(item);
+    if (item?.type === "agent_message") {
+      // MultiAgent V2 delivers a freshly spawned child's delegated task after the ordinary
+      // user-shaped Codex environment envelope. It is the current instruction, not replayed
+      // human history. Require canonical current-turn provenance before using it for replay,
+      // steering, or execution identity.
+      const serverOwnedId = typeof item.id === "string" && item.id.length > 0;
+      if (!serverOwnedId || !messageTurnId) {
+        throw new Error("ChatGPT web agent_message requires native Codex item and turn provenance");
+      }
+      if (expectedTurnId && messageTurnId !== expectedTurnId) {
+        throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);
+      }
+      return { content: item.content, turnId: messageTurnId };
+    }
     // Codex appends an abort report as a user-shaped item carrying the interrupted turn's id. Only
     // suppress that synthetic notice when its metadata proves it belongs to a different turn; a
     // human is still allowed to submit the same XML-looking text as their current instruction.
@@ -159,26 +178,26 @@ export function extractChatGptCompactionSourceRevision(parsed: CodexParsedReques
   return revision;
 }
 
-function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurnId?: string): string | undefined {
-  if (userIndex <= 0) return undefined;
-  const user = record(input[userIndex]);
-  if (user?.type !== "message" || user.role !== "user") return undefined;
+function environmentBeforeInstruction(input: unknown[], instructionIndex: number, expectedTurnId?: string): string | undefined {
+  if (instructionIndex <= 0) return undefined;
+  const instruction = record(input[instructionIndex]);
+  if (!isInstructionItem(instruction)) return undefined;
 
-  const userTurnId = itemTurnId(user);
-  if (!userTurnId || (expectedTurnId && userTurnId !== expectedTurnId)) return undefined;
+  const instructionTurnId = itemTurnId(instruction);
+  if (!instructionTurnId || (expectedTurnId && instructionTurnId !== expectedTurnId)) return undefined;
 
-  let candidateIndex = userIndex - 1;
+  let candidateIndex = instructionIndex - 1;
   let candidate = record(input[candidateIndex]);
   while (candidate?.type === "message" && candidate.role === "developer") {
     const developerTurnId = itemTurnId(candidate);
-    if (developerTurnId !== userTurnId) return undefined;
+    if (developerTurnId !== instructionTurnId) return undefined;
     candidateIndex -= 1;
     candidate = record(input[candidateIndex]);
   }
   if (candidate?.type !== "message" || candidate.role !== "user") return undefined;
 
   const candidateTurnId = itemTurnId(candidate);
-  if (candidateTurnId !== userTurnId) return undefined;
+  if (candidateTurnId !== instructionTurnId) return undefined;
 
   const content = Array.isArray(candidate.content) ? candidate.content : [];
   for (const part of content) {
@@ -309,23 +328,23 @@ function isCurrentThreadVisualizationRoot(path: string, metadata: Record<string,
     && parts[3] === expectedThreadId;
 }
 
-function canonicalMetadataEnvironmentBeforeUser(
+function canonicalMetadataEnvironmentBeforeInstruction(
   input: unknown[],
-  userIndex: number,
+  instructionIndex: number,
   metadata: Record<string, unknown> | undefined,
   requireMetadataBoundRoots = false,
 ): string | undefined {
-  if (userIndex <= 0 || !metadata) return undefined;
+  if (instructionIndex <= 0 || !metadata) return undefined;
   const metadataTurnId = typeof metadata.turn_id === "string" ? metadata.turn_id.trim() : "";
   const metadataSandbox = sandboxTypeFromMetadata(canonicalSandboxMetadata(metadata));
   if (!metadataTurnId || !metadataSandbox) return undefined;
 
-  const user = record(input[userIndex]);
-  if (user?.type !== "message" || user.role !== "user" || typeof user.id !== "string" || !user.id) return undefined;
-  const userTurnId = itemTurnId(user);
-  if (userTurnId !== undefined && userTurnId !== metadataTurnId) return undefined;
+  const instruction = record(input[instructionIndex]);
+  if (!isInstructionItem(instruction) || typeof instruction?.id !== "string" || !instruction.id) return undefined;
+  const instructionTurnId = itemTurnId(instruction);
+  if (instructionTurnId !== undefined && instructionTurnId !== metadataTurnId) return undefined;
 
-  let candidateIndex = userIndex - 1;
+  let candidateIndex = instructionIndex - 1;
   let candidate = record(input[candidateIndex]);
   while (candidate?.type === "message" && candidate.role === "developer") {
     const developerTurnId = itemTurnId(candidate);
@@ -368,36 +387,36 @@ function hasAssistantOutputBetween(input: unknown[], startIndex: number, endInde
 function rawEnvironmentText(parsed: CodexParsedRequest): string | undefined {
   const body = record(parsed._rawBody);
   const input = Array.isArray(body?.input) ? body.input : [];
-  let activeUserIndex = -1;
+  let activeInstructionIndex = -1;
   for (let index = input.length - 1; index >= 0; index -= 1) {
-    if (record(input[index])?.role === "user") {
-      activeUserIndex = index;
+    if (isInstructionItem(record(input[index]))) {
+      activeInstructionIndex = index;
       break;
     }
   }
   const turnId = clientTurnMetadata(parsed)?.turn_id;
-  const currentByTurn = environmentBeforeUser(
+  const currentByTurn = environmentBeforeInstruction(
     input,
-    activeUserIndex,
+    activeInstructionIndex,
     typeof turnId === "string" ? turnId : undefined,
   );
   if (currentByTurn) return currentByTurn;
 
-  const current = canonicalMetadataEnvironmentBeforeUser(input, activeUserIndex, clientTurnMetadata(parsed));
+  const current = canonicalMetadataEnvironmentBeforeInstruction(input, activeInstructionIndex, clientTurnMetadata(parsed));
   if (current) return current;
 
   // A skill invocation appends another server-owned user item after the real instruction. Recover
   // the earlier current-turn environment/prompt pair only through canonical metadata, and bind all
   // declared roots to metadata workspaces so user-authored XML cannot widen filesystem authority.
   const metadata = clientTurnMetadata(parsed);
-  for (let index = activeUserIndex - 1; index > 0; index -= 1) {
-    const sameTurn = canonicalMetadataEnvironmentBeforeUser(input, index, metadata, true);
+  for (let index = activeInstructionIndex - 1; index > 0; index -= 1) {
+    const sameTurn = canonicalMetadataEnvironmentBeforeInstruction(input, index, metadata, true);
     if (sameTurn) return sameTurn;
   }
 
   const replayPrefixLen = Math.min(parsed._replayPrefixLen ?? 0, input.length);
   for (let index = replayPrefixLen - 1; index > 0; index -= 1) {
-    const replayed = environmentBeforeUser(input, index);
+    const replayed = environmentBeforeInstruction(input, index);
     if (replayed) return replayed;
   }
 
@@ -411,22 +430,21 @@ function rawEnvironmentText(parsed: CodexParsedRequest): string | undefined {
   const currentThreadId = typeof metadata?.thread_id === "string" && metadata.thread_id.trim()
     ? metadata.thread_id
     : undefined;
-  const activeUser = record(input[activeUserIndex]);
-  const activeUserOwned = activeUser?.type === "message"
-    && activeUser.role === "user"
-    && typeof activeUser.id === "string"
-    && activeUser.id.length > 0
-    && itemTurnId(activeUser) === currentTurnId;
-  if (currentTurnId && itemTurnId(activeUser) === currentTurnId) {
-    for (let index = activeUserIndex - 1; index > 0; index -= 1) {
+  const activeInstruction = record(input[activeInstructionIndex]);
+  const activeInstructionOwned = isInstructionItem(activeInstruction)
+    && typeof activeInstruction?.id === "string"
+    && activeInstruction.id.length > 0
+    && itemTurnId(activeInstruction) === currentTurnId;
+  if (currentTurnId && itemTurnId(activeInstruction) === currentTurnId) {
+    for (let index = activeInstructionIndex - 1; index > 0; index -= 1) {
       const historicalUser = record(input[index]);
       const historicalTurnId = itemTurnId(historicalUser);
       if (!historicalTurnId || historicalTurnId === currentTurnId) continue;
-      const historical = environmentBeforeUser(input, index);
+      const historical = environmentBeforeInstruction(input, index);
       if (!historical) continue;
-      if (hasAssistantOutputBetween(input, index + 1, activeUserIndex)) return historical;
-      if (!currentThreadId || !metadata || !activeUserOwned) continue;
-      const bounded = canonicalMetadataEnvironmentBeforeUser(
+      if (hasAssistantOutputBetween(input, index + 1, activeInstructionIndex)) return historical;
+      if (!currentThreadId || !metadata || !activeInstructionOwned) continue;
+      const bounded = canonicalMetadataEnvironmentBeforeInstruction(
         input,
         index,
         { ...metadata, turn_id: historicalTurnId, sandbox: canonicalSandboxMetadata(metadata) },

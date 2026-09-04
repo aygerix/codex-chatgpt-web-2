@@ -116,9 +116,116 @@ describe("native subagent user revision lineage", () => {
     expect(() => extractChatGptTurnUserRevision(spawnedChildRevision("turn_parent", "turn_parent", "other")))
       .toThrow("current user message conflicts with native Codex turn_id metadata");
   });
+
+  test("uses the current plaintext MultiAgent V2 agent_message as the child revision", () => {
+    const request = spawnedChildRevision();
+    const body = request._rawBody as { input: Array<Record<string, unknown>> };
+    body.input.unshift({
+      type: "message",
+      id: "msg_replayed_parent_prompt",
+      role: "user",
+      content: [{ type: "input_text", text: "The parent's earlier human request" }],
+      internal_chat_message_metadata_passthrough: { turn_id: "turn_parent" },
+    });
+    body.input.push({
+      type: "agent_message",
+      id: "amsg_child_task",
+      author: "/root",
+      recipient: "/root/read_package_version",
+      content: [{ type: "input_text", text: "Read package.json and return its version" }],
+      internal_chat_message_metadata_passthrough: { turn_id: "turn_child" },
+    });
+
+    expect(extractChatGptTurnUserRevision(request)).toEqual([
+      { type: "input_text", text: "Read package.json and return its version" },
+    ]);
+  });
+
+  test("rejects a plaintext agent_message without current-turn native provenance", () => {
+    for (const invalidAgentMessage of [{
+      type: "agent_message",
+      id: "amsg_wrong_turn",
+      content: [{ type: "input_text", text: "Wrong turn" }],
+      internal_chat_message_metadata_passthrough: { turn_id: "turn_other" },
+    }, {
+      type: "agent_message",
+      content: [{ type: "input_text", text: "No provenance" }],
+    }]) {
+      const request = spawnedChildRevision();
+      (request._rawBody as { input: Array<Record<string, unknown>> }).input.push(invalidAgentMessage);
+      expect(() => extractChatGptTurnUserRevision(request)).toThrow();
+    }
+  });
 });
 
 describe("trusted current Codex environment envelope", () => {
+  test("accepts the exact MultiAgent V2 child ordering captured from Codex 0.153.1", () => {
+    const request = currentWire();
+    request._rawBody = {
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({
+          request_kind: "turn",
+          thread_id: "thread_child",
+          turn_id: "turn_child",
+          parent_thread_id: "thread_parent",
+          parent_turn_id: "turn_parent",
+          agent_name: "/root/wrapper_probe_ctx",
+          subagent_kind: "thread_spawn",
+          sandbox_mode: "danger-full-access",
+          workspaces: { [root]: { has_changes: false } },
+        }),
+      },
+      input: [{
+        type: "message",
+        id: "msg_replayed_parent_prompt",
+        role: "user",
+        content: [{ type: "input_text", text: "The parent's earlier human request" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_parent" },
+      }, {
+        type: "message",
+        id: "msg_child_developer",
+        role: "developer",
+        content: [{ type: "input_text", text: "You are a collaborating child agent." }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_child" },
+      }, {
+        type: "message",
+        id: "msg_child_environment",
+        role: "user",
+        content: [
+          { type: "input_text", text: "<recommended_plugins>none</recommended_plugins>" },
+          { type: "input_text", text: "<agents_md>Follow the workspace policy.</agents_md>" },
+          { type: "input_text", text: environmentXml },
+        ],
+        internal_chat_message_metadata_passthrough: {
+          turn_id: "turn_child",
+          content_item_kinds: [
+            "plugins.recommendations",
+            "agents_md.instructions",
+            "environments.environment_context",
+          ],
+        },
+      }, {
+        type: "agent_message",
+        id: "amsg_child_task",
+        author: "/root",
+        recipient: "/root/wrapper_probe_ctx",
+        content: [{ type: "input_text", text: "Inspect the wrapper and report evidence" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_child" },
+      }],
+    };
+
+    expect(extractChatGptTurnEnvironment(request)).toEqual({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    });
+    expect(extractChatGptTurnUserRevision(request)).toEqual([
+      { type: "input_text", text: "Inspect the wrapper and report evidence" },
+    ]);
+  });
+
   test("accepts the v0.146 split envelope when workspace and sandbox metadata agree", () => {
     expect(extractChatGptTurnEnvironment(currentWire())).toEqual({
       cwd: root,
