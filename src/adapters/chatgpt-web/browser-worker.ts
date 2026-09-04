@@ -4759,6 +4759,40 @@ export class ChatGptBrowserWorker {
         }
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
        } catch (error) {
+        // A bounded Playwright observation timeout means the existing Electron renderer stopped
+        // answering one read; it does not prove that the retained ChatGPT turn failed. Rebind the
+        // same launcher-owned page before any iteration side effect has happened, exactly as the
+        // missing-response reconciliation path does above. This is especially important for the
+        // tool-only retained compaction handoff, whose assistant DOM can be transiently busy while
+        // the one-shot control call is being accepted.
+        if (
+          error instanceof ChatGptBrowserObservationTimeoutError
+          && !observedThisIteration
+          && launcherSurfaceId
+        ) {
+          consecutiveObservationRebinds += 1;
+          if (consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
+            throw new Error(
+              `ChatGPT browser DOM remained unresponsive after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
+              { cause: error },
+            );
+          }
+          await rebindLauncherPage(consecutiveObservationRebinds, error);
+          submissionBaseline = {
+            ...submissionBaseline,
+            userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
+            responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
+            domCache: {},
+          };
+          responseTurn = {
+            ...responseTurn,
+            locator: page.locator(`[data-testid=${JSON.stringify(responseTurn.identity)}]`),
+          };
+          responseDomCache = {};
+          internalObservationFaults = 0;
+          await diagnostics.capture(page, "response-page-rebound-after-observation-timeout");
+          continue;
+        }
         // Only a defect in this worker is retried here. Every deliberate signal — adapter errors,
         // aborts, closed tabs, DOM-health verdicts — still fails the turn immediately.
         // Retry only faults raised while reading the page. Once observation succeeded, a

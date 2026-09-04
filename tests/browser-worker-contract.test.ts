@@ -112,6 +112,17 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   expect(workerSource).toContain("__CODEX_WEB_GPT_STEER_REVISION__");
   expect(workerSource).toContain("waitForSteeredAssistantTurn");
   expect(workerSource).toContain("completionSteerRevision > handledSteerRevision");
+  const observationCatch = workerSource.slice(
+    workerSource.indexOf("       } catch (error) {", workerSource.indexOf("for (;;) {", workerSource.indexOf("let completionFenceRevision"))),
+    workerSource.indexOf("      if (this.context && this.config.browserHost", workerSource.indexOf("let completionFenceRevision")),
+  );
+  expect(observationCatch).toContain("error instanceof ChatGptBrowserObservationTimeoutError");
+  expect(observationCatch).toContain("!observedThisIteration");
+  expect(observationCatch).toContain("await rebindLauncherPage(consecutiveObservationRebinds, error)");
+  expect(observationCatch).toContain("response-page-rebound-after-observation-timeout");
+  expect(observationCatch.indexOf("error instanceof ChatGptBrowserObservationTimeoutError")).toBeLessThan(
+    observationCatch.indexOf("if (!(error instanceof TypeError) || observedThisIteration) throw error"),
+  );
 });
 
 test("conversation turn identity survives ChatGPT DOM virtualization", () => {
