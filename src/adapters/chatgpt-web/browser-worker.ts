@@ -150,13 +150,22 @@ export function chatGptCodexSteerDisposition(
   return "none";
 }
 
-const CHATGPT_DOM_REVISION_ATTRIBUTES = [
+/**
+ * Attributes whose changes can alter the semantic turn state read by the worker.
+ *
+ * Do not add `class` or `style` here. ChatGPT mutates presentation attributes while animating
+ * spinners, menus, and streamed content. Observing those mutations turns the submission observer
+ * into a frame-driven loop which repeatedly scans the full conversation DOM and can pin a renderer
+ * core even though no semantic turn state changed. Structural mutations still invalidate the cache
+ * through `childList` and `characterData`, while the attributes below cover state transitions that
+ * can happen in place.
+ */
+export const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "aria-hidden",
   "aria-label",
   "aria-busy",
   "aria-disabled",
   "aria-expanded",
-  "class",
   "data-item-anchor",
   "data-is-last-node",
   "data-message-author-role",
@@ -170,7 +179,6 @@ const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "open",
   "role",
   "start",
-  "style",
 ] as const;
 
 const settleChatGptUi = (): Promise<void> => (

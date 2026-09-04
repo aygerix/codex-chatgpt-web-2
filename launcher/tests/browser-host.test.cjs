@@ -386,6 +386,7 @@ test("hidden turn tabs receive an explicit renderer viewport before moving offsc
       setBounds: bounds => events.push(["bounds", bounds]),
       setVisible: visible => events.push(["visible", visible]),
       webContents: {
+        setBackgroundThrottling: allowed => events.push(["background-throttling", allowed]),
         enableDeviceEmulation: options => events.push(["emulate", options]),
         disableDeviceEmulation: () => events.push(["disable-emulation"]),
       },
@@ -415,6 +416,7 @@ test("hidden turn tabs receive an explicit renderer viewport before moving offsc
   assert.deepEqual(events, [
     ["home-bounds", { x: 1121, y: 721, width: 1120, height: 720 }],
     ["home-visible", true],
+    ["background-throttling", true],
     ["emulate", {
       screenPosition: "desktop",
       screenSize: { width: 1120, height: 720 },
@@ -442,6 +444,7 @@ test("turn tabs use the hidden viewport when the launcher window is hidden", () 
       setBounds: bounds => events.push(["bounds", bounds]),
       setVisible: visible => events.push(["visible", visible]),
       webContents: {
+        setBackgroundThrottling: allowed => events.push(["background-throttling", allowed]),
         enableDeviceEmulation: options => events.push(["emulate", options]),
         disableDeviceEmulation: () => events.push(["disable-emulation"]),
       },
@@ -471,6 +474,7 @@ test("turn tabs use the hidden viewport when the launcher window is hidden", () 
   assert.deepEqual(events, [
     ["home-bounds", { x: 1121, y: 721, width: 1120, height: 720 }],
     ["home-visible", true],
+    ["background-throttling", true],
     ["emulate", {
       screenPosition: "desktop",
       screenSize: { width: 1120, height: 720 },
@@ -497,6 +501,7 @@ test("new turn tabs defer device emulation until their renderer finishes loading
       setBounds: bounds => events.push(["bounds", bounds]),
       setVisible: visible => events.push(["visible", visible]),
       webContents: {
+        setBackgroundThrottling: allowed => events.push(["background-throttling", allowed]),
         enableDeviceEmulation: () => assert.fail("emulation started before did-finish-load"),
         disableDeviceEmulation: () => assert.fail("emulation cleared before did-finish-load"),
       },
@@ -513,6 +518,7 @@ test("new turn tabs defer device emulation until their renderer finishes loading
   BrowserHost.prototype.presentTurnView.call(fixture, tab, false);
 
   assert.deepEqual(events, [
+    ["background-throttling", true],
     ["bounds", { x: 1121, y: 721, width: 1120, height: 720 }],
     ["visible", true],
   ]);
@@ -532,6 +538,7 @@ test("visible turn tabs establish native bounds before clearing background emula
       setBounds: bounds => events.push(["bounds", bounds]),
       setVisible: visible => events.push(["visible", visible]),
       webContents: {
+        setBackgroundThrottling: allowed => events.push(["background-throttling", allowed]),
         enableDeviceEmulation: options => events.push(["emulate", options]),
         disableDeviceEmulation: () => events.push(["disable-emulation"]),
       },
@@ -561,6 +568,7 @@ test("visible turn tabs establish native bounds before clearing background emula
   assert.deepEqual(events, [
     ["home-bounds", { x: 1121, y: 721, width: 1120, height: 720 }],
     ["home-visible", true],
+    ["background-throttling", false],
     ["bounds", { x: 280, y: 64, width: 840, height: 656 }],
     ["disable-emulation"],
     ["visible", true],
@@ -1917,7 +1925,7 @@ test("a failed runtime cancellation keeps the running DOM attached", async () =>
   assert.deepEqual(closed, []);
 });
 
-test("a later provider round reuses only its exact connector-bound conversation", () => {
+test("a later provider round reuses only its exact connector-bound conversation without forcing foreground rendering", () => {
   const throttling = [];
   const conversationKey = "a".repeat(64);
   const tab = {
@@ -1974,7 +1982,7 @@ test("a later provider round reuses only its exact connector-bound conversation"
   assert.equal(tab.message, "ChatGPT is working");
   assert.equal(tab.bootstrapReady, true);
   assert.equal(fixture.selectedTabId, tab.id);
-  assert.deepEqual(throttling, [false]);
+  assert.deepEqual(throttling, []);
   assert.deepEqual(events, ["visible", "published", "descriptor", "browser.tab_reused"]);
 });
 

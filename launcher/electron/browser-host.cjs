@@ -442,7 +442,11 @@ class BrowserHost {
         nodeIntegration: false,
         sandbox: true,
         spellcheck: true,
-        backgroundThrottling: false,
+        // Hidden turn views retain a real viewport for Playwright, but Chromium must still be
+        // allowed to throttle their timers and animation frames. Disabling throttling here makes
+        // every offscreen ChatGPT task render at foreground speed and multiplies CPU/GPU use by
+        // the number of concurrent turns.
+        backgroundThrottling: true,
       },
     });
     const tab = {
@@ -1062,11 +1066,16 @@ class BrowserHost {
   }
 
   presentTurnView(tab, visible) {
+    const contents = tab.view.webContents;
+    // Only the tab the user can actually see needs foreground rendering. Running offscreen turns
+    // remain attached with an emulated viewport, so browser automation and network activity keep
+    // working while Chromium is allowed to coalesce purely visual background work.
+    contents.setBackgroundThrottling?.(!visible);
     if (visible) {
       // Establish native on-screen bounds before removing the background viewport contract.
       tab.view.setBounds(this.bounds);
       if (tab.rendererReady && tab.deviceEmulationViewport) {
-        tab.view.webContents.disableDeviceEmulation();
+        contents.disableDeviceEmulation();
         tab.deviceEmulationViewport = null;
       }
       if (tab.rendererReady) tab.deviceEmulationDirty = false;
@@ -1079,7 +1088,7 @@ class BrowserHost {
         && (tab.deviceEmulationDirty
           || tab.deviceEmulationViewport?.width !== bounds.width
           || tab.deviceEmulationViewport?.height !== bounds.height)) {
-        this.enableHiddenTurnViewport(tab.view.webContents, bounds);
+        this.enableHiddenTurnViewport(contents, bounds);
         tab.deviceEmulationViewport = { width: bounds.width, height: bounds.height };
         tab.deviceEmulationDirty = false;
       }
@@ -1483,9 +1492,6 @@ class BrowserHost {
         existing.bootstrapDeadlineAt = Date.now() + TURN_TAB_BOOTSTRAP_TIMEOUT_MS;
       }
       existing.lastHeartbeatAt = Date.now();
-      if (!existing.view.webContents.isDestroyed()) {
-        existing.view.webContents.setBackgroundThrottling(false);
-      }
       this.selectedTabId = existing.id;
       if (reveal) this.show();
       else this.syncViewVisibility();
