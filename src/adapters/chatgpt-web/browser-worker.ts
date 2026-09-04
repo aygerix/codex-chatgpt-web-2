@@ -135,6 +135,79 @@ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
  */
 export const CHATGPT_UI_SETTLE_MS = 250;
 export const CHATGPT_SEND_ENABLE_GRACE_MS = 5_000;
+export const CHATGPT_EFFORT_SLIDER_STABLE_MS = 300;
+
+export interface ChatGptEffortSliderState {
+  min: number;
+  max: number;
+  value: number;
+}
+
+/**
+ * Move ChatGPT's semantic effort slider to an exact, stable value.
+ *
+ * The picker can replace or reset its slider while the model-family panel settles. A single
+ * ArrowLeft has been observed to jump from Pro (4) to Instant (0), so a unit-step assertion is
+ * not a safe recovery strategy. Re-read the live ARIA state after every key, recalculate the
+ * direction after any jump, and do not allow submission until the target remains stable.
+ */
+export async function setChatGptEffortSliderValue(
+  readState: () => Promise<ChatGptEffortSliderState | undefined>,
+  press: (key: "ArrowLeft" | "ArrowRight") => Promise<void>,
+  targetValue: number,
+  options: { timeoutMs?: number; pollMs?: number; stableMs?: number } = {},
+): Promise<ChatGptEffortSliderState> {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const pollMs = options.pollMs ?? 50;
+  const stableMs = options.stableMs ?? CHATGPT_EFFORT_SLIDER_STABLE_MS;
+  const deadline = Date.now() + timeoutMs;
+  let pressCount = 0;
+  let state = await readState();
+  if (!state) throw new Error("ChatGPT effort slider exposed an invalid ARIA range");
+  if (targetValue < state.min || targetValue > state.max) {
+    throw new Error(
+      `ChatGPT effort slider target ${targetValue} is outside its semantic range`
+      + ` (min=${state.min}; max=${state.max})`,
+    );
+  }
+
+  while (Date.now() < deadline) {
+    if (state.value === targetValue) {
+      const stableDeadline = Date.now() + stableMs;
+      do {
+        if (pollMs > 0) await new Promise(resolveSleep => setTimeout(resolveSleep, pollMs));
+        const observed = await readState();
+        if (!observed) throw new Error("ChatGPT effort slider lost its semantic ARIA state");
+        state = observed;
+        if (state.value !== targetValue) break;
+      } while (Date.now() < stableDeadline && Date.now() < deadline);
+      if (state.value === targetValue && Date.now() >= stableDeadline) return state;
+      continue;
+    }
+
+    if (pressCount >= 12) break;
+    const previousValue = state.value;
+    const key = targetValue > previousValue ? "ArrowRight" : "ArrowLeft";
+    await press(key);
+    pressCount += 1;
+
+    // Wait for this key's state transition before issuing another. This prevents a slow render
+    // from accumulating repeated keys, while still allowing a no-op key to be retried.
+    const changeDeadline = Math.min(deadline, Date.now() + 1_500);
+    do {
+      const observed = await readState();
+      if (!observed) throw new Error("ChatGPT effort slider lost its semantic ARIA state");
+      state = observed;
+      if (state.value !== previousValue) break;
+      if (pollMs > 0) await new Promise(resolveSleep => setTimeout(resolveSleep, pollMs));
+    } while (Date.now() < changeDeadline);
+  }
+
+  throw new Error(
+    `ChatGPT effort slider did not stabilize at ${targetValue}`
+    + ` (last=${state.value}; presses=${pressCount})`,
+  );
+}
 
 export interface ChatGptCodexSteerState {
   accepted: number;
@@ -1561,6 +1634,7 @@ interface ChatGptResponseDomSnapshot {
   visibleText: string;
   fullHtml: string;
   markdownSegments: ChatGptMarkdownSegment[];
+  answerProjectionAnchored: boolean;
   completionActionVisible: boolean;
   streamingStatusVisible: boolean;
   stoppedThinkingVisible: boolean;
@@ -1579,11 +1653,36 @@ const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
   visibleText: "",
   fullHtml: "",
   markdownSegments: [],
+  answerProjectionAnchored: false,
   completionActionVisible: false,
   streamingStatusVisible: false,
   stoppedThinkingVisible: false,
   traceBlocks: [],
 });
+
+/**
+ * Selects the Markdown projection that may advance the append-only Codex text stream.
+ *
+ * During a tool-heavy reasoning turn ChatGPT can briefly remove its streaming-status container
+ * while React reparents the collapsed reasoning trace. In that transient DOM every old commentary
+ * `.markdown` root looks like answer text. Once this turn has exposed structured activity, an
+ * unanchored projection is therefore provisional: ignore it while the turn is live, and consume it
+ * without streaming only after independent completion evidence has settled.
+ */
+export function chatGptMarkdownProjectionForObservation(
+  segments: ChatGptMarkdownSegment[],
+  state: {
+    answerProjectionAnchored: boolean;
+    sawStructuredActivity: boolean;
+    completionReady: boolean;
+  },
+): ChatGptMarkdownSegment[] | undefined {
+  if (state.answerProjectionAnchored || !state.sawStructuredActivity) return segments;
+  if (!state.completionReady) return undefined;
+  return segments.map(segment => segment.streamable
+    ? { ...segment, streamable: false }
+    : segment);
+}
 
 /** Convert the public ChatGPT turn DOM into append-only Codex reasoning summaries. */
 export class ChatGptVisibleTraceTracker {
@@ -2337,6 +2436,10 @@ export class ChatGptBrowserWorker {
         await currentEffort.click({ force: true });
       }
       await effortSlider.waitFor({ state: "visible", timeout: 10_000 });
+      // Family selection replaces the picker panel. Even if an old menu item won the readiness
+      // race above, the newly resolved family UI is slider-based and must take the exact-value
+      // path below; carrying the stale branch decision can submit at the default Instant tier.
+      ready = "slider";
     }
     if (ready === "slider") {
       let sliderState = parseChatGptEffortSliderState(
@@ -2358,30 +2461,22 @@ export class ChatGptBrowserWorker {
           { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: false },
         );
       }
-      const sliderControl = effortSlider.locator("xpath=ancestor::*[@role='menuitem'][1]");
-      while (sliderState.value !== targetValue) {
-        await throwIfChatGptRateLimitDialog(page);
-        const direction = targetValue > sliderState.value ? 1 : -1;
-        const key = direction > 0 ? "ArrowRight" : "ArrowLeft";
-        const previousValue = sliderState.value;
-        await sliderControl.press(key);
-        const changeDeadline = Date.now() + 5_000;
-        do {
-          sliderState = parseChatGptEffortSliderState(
+      sliderState = await setChatGptEffortSliderValue(
+        async () => parseChatGptEffortSliderState(
             await effortSlider.getAttribute("aria-valuemin"),
             await effortSlider.getAttribute("aria-valuemax"),
             await effortSlider.getAttribute("aria-valuenow"),
-          );
-          if (!sliderState) throw new Error("ChatGPT effort slider lost its semantic ARIA state");
-          if (sliderState.value !== previousValue) break;
-          await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
-        } while (Date.now() < changeDeadline);
-        if (sliderState.value !== previousValue + direction) {
-          throw new Error(
-            `ChatGPT effort slider did not move exactly one step with ${key}`
-            + ` (before=${previousValue}; after=${sliderState.value})`,
-          );
-        }
+        ),
+        async key => {
+          await throwIfChatGptRateLimitDialog(page);
+          // Send the key to the ARIA slider itself. Its enclosing menuitem handles arrows as
+          // picker navigation and can reset the value to Instant while React is settling.
+          await effortSlider.press(key);
+        },
+        targetValue,
+      );
+      if (sliderState.value !== targetValue) {
+        throw new Error(`ChatGPT effort slider postcondition failed (expected=${targetValue}; actual=${sliderState.value})`);
       }
       await captureDiagnostic?.("effort-selected");
       await page.keyboard.press("Escape");
@@ -4178,6 +4273,10 @@ export class ChatGptBrowserWorker {
           visibleText: renderedRoots.map(candidate => candidate.innerText.trim()).filter(Boolean).join("\n\n"),
           fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
           markdownSegments,
+          // A live reasoning/status container gives DOM order a trustworthy commentary/answer
+          // boundary. The response-scoped Copy action gives the same proof after finalization.
+          // Without either signal, a structured turn may be in React's transient collapsed state.
+          answerProjectionAnchored: streamingStatusContainers.length > 0 || completionAction !== undefined,
           completionActionVisible: completionAction !== undefined,
           streamingStatusVisible: streamingStatusContainers.length > 0,
           stoppedThinkingVisible,
@@ -4737,6 +4836,7 @@ export class ChatGptBrowserWorker {
       let lastHeartbeat = 0;
       let finalText = "";
       let sawRunning = false;
+      let sawStructuredActivity = false;
       let loggedCompletionWait = false;
       let capturedResponse = false;
       let sentAt = Date.now();
@@ -4810,6 +4910,7 @@ export class ChatGptBrowserWorker {
         capturedResponse = false;
         loggedCompletionWait = false;
         sawRunning = false;
+        sawStructuredActivity = false;
         sentAt = Date.now();
         consecutiveObservationRebinds = 0;
         internalObservationFaults = 0;
@@ -4917,6 +5018,11 @@ export class ChatGptBrowserWorker {
         // Liveness may postpone a verdict, never waive it: once activity goes stale the DOM alone
         // decides, so a tool call that never returns cannot hold an undeadlined turn open forever.
         const externalProgressSnapshot = turn.externalProgress?.snapshot();
+        if (snapshot.streamingStatusVisible
+          || snapshot.traceBlocks.some(block => block.kind === "commentary" || block.kind === "status")
+          || (externalProgressSnapshot?.lastToolBatchRevision ?? 0) > 0) {
+          sawStructuredActivity = true;
+        }
         if (turn.externalProgress
           && externalProgressSnapshot
           && completionTracker.needsToolBatchObservation(externalProgressSnapshot.lastToolBatchRevision)) {
@@ -4953,18 +5059,10 @@ export class ChatGptBrowserWorker {
             capturedResponse = true;
             await diagnostics.capture(page, "response-visible");
           }
-          const textDelta = (() => {
-            try {
-              return markdownBuffer.observe(snapshot.markdownSegments);
-            } catch (error) {
-              return throwMarkdownConsistencyError(error);
-            }
-          })();
           for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible)) {
             if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);
             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
           }
-          if (textDelta) emitMarkdownDelta(textDelta);
           const domError = domHealthTracker.update({
             responsePresent: snapshot.responsePresent,
             running,
@@ -4983,6 +5081,24 @@ export class ChatGptBrowserWorker {
             streamingStatusVisible: snapshot.streamingStatusVisible,
             externalToolCallsInFlight,
           });
+          const projectedSegments = chatGptMarkdownProjectionForObservation(
+            snapshot.markdownSegments,
+            {
+              answerProjectionAnchored: snapshot.answerProjectionAnchored,
+              sawStructuredActivity,
+              completionReady,
+            },
+          );
+          if (projectedSegments) {
+            const textDelta = (() => {
+              try {
+                return markdownBuffer.observe(projectedSegments);
+              } catch (error) {
+                return throwMarkdownConsistencyError(error);
+              }
+            })();
+            if (textDelta) emitMarkdownDelta(textDelta);
+          }
           if (!completionReady) completionFenceRevision = undefined;
           if (completionReady) {
             const completionSteerState = await this.readCodexSteerState(page);

@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_DOM_REVISION_ATTRIBUTES, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_DOM_REVISION_ATTRIBUTES, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, chatGptMarkdownProjectionForObservation, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, setChatGptEffortSliderValue, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
+import { ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
 import { parseChatGptEffortSliderState } from "../src/chatgpt-session";
@@ -1612,7 +1613,9 @@ test("effort selection uses structural menu and slider indices instead of locali
   expect(workerSource).toContain('getAttribute("aria-checked")');
   expect(workerSource).toContain('getAttribute("aria-expanded")');
   expect(workerSource).toContain('getAttribute("aria-valuenow")');
-  expect(workerSource).toContain("sliderControl.press(key)");
+  expect(workerSource).toContain("effortSlider.press(key)");
+  expect(workerSource).toContain("setChatGptEffortSliderValue(");
+  expect(workerSource).toContain('ready = "slider";');
   expect(workerSource).toContain('if (ready !== "slider" && await effortSlider.isVisible().catch(() => false)) ready = "slider";');
   expect(workerSource).not.toContain("currentLabel === targetLabel");
   expect(workerSource).not.toContain("chatGptEffortLabelsMatch");
@@ -1631,6 +1634,24 @@ test("effort slider ARIA state fails closed on malformed and unsupported ranges"
   ] as const) {
     expect(parseChatGptEffortSliderState(attributes[0], attributes[1], attributes[2])).toBeUndefined();
   }
+});
+
+test("effort slider recovers from a Pro-to-Instant jump and requires a stable exact target", async () => {
+  const values = [4, 0, 1, 2, 3, 3];
+  let index = 0;
+  const keys: string[] = [];
+  const result = await setChatGptEffortSliderValue(
+    async () => ({ min: 0, max: 4, value: values[Math.min(index, values.length - 1)] }),
+    async key => {
+      keys.push(key);
+      index += 1;
+    },
+    3,
+    { timeoutMs: 100, pollMs: 0, stableMs: 0 },
+  );
+
+  expect(result.value).toBe(3);
+  expect(keys).toEqual(["ArrowLeft", "ArrowRight", "ArrowRight", "ArrowRight"]);
 });
 
 test("Luna-only browser turns verify selector absence instead of opening an effort menu", async () => {
@@ -2554,7 +2575,9 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("sourceStart: Math.min(...ranges.map");
   expect(workerSource).toContain("sourceEnd: Math.max(...ranges.map");
   expect(workerSource).toContain("streamable: index < segments.length - 1");
-  expect(workerSource).toContain("markdownBuffer.observe(snapshot.markdownSegments)");
+  expect(workerSource).toContain("answerProjectionAnchored: streamingStatusContainers.length > 0 || completionAction !== undefined");
+  expect(workerSource).toContain("chatGptMarkdownProjectionForObservation(");
+  expect(workerSource).toContain("markdownBuffer.observe(projectedSegments)");
   expect(workerSource).toContain("if (completionTracker.update({");
   expect(workerSource).not.toContain("markdownBuffer.currentSnapshotIsConsistent() && completionTracker.update");
   expect(workerSource).not.toContain("streamCompletedBlocks");
@@ -2581,6 +2604,79 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("!overlapsRenderedAnswer(semantic)");
   expect(workerSource).toContain("!overlapsRenderedAnswer(container)");
   expect(workerSource).not.toContain('fullHtml: rendered?.innerHTML ?? ""');
+});
+
+test("structured turns hold an unanchored Markdown projection until completion", () => {
+  const segments = [
+    {
+      key: "0:p",
+      tag: "p",
+      html: "<p>Earlier commentary</p>",
+      text: "Earlier commentary",
+      streamable: true,
+    },
+    {
+      key: "1:p",
+      tag: "p",
+      html: "<p>Still working</p>",
+      text: "Still working",
+      streamable: false,
+    },
+  ];
+
+  expect(chatGptMarkdownProjectionForObservation(segments, {
+    answerProjectionAnchored: false,
+    sawStructuredActivity: false,
+    completionReady: false,
+  })).toBe(segments);
+
+  // Reproduces trace 0ec3b9a04029: a tool turn temporarily loses the reasoning-status boundary,
+  // exposing old commentary as apparent answer Markdown. Nothing from that projection may commit.
+  expect(chatGptMarkdownProjectionForObservation(segments, {
+    answerProjectionAnchored: false,
+    sawStructuredActivity: true,
+    completionReady: false,
+  })).toBeUndefined();
+
+  expect(chatGptMarkdownProjectionForObservation(segments, {
+    answerProjectionAnchored: true,
+    sawStructuredActivity: true,
+    completionReady: false,
+  })).toBe(segments);
+
+  // If ChatGPT omits the Copy action, independent terminal evidence may still release the final
+  // projection, but it is consumed atomically so it cannot escape before the completion fence.
+  const terminal = chatGptMarkdownProjectionForObservation(segments, {
+    answerProjectionAnchored: false,
+    sawStructuredActivity: true,
+    completionReady: true,
+  });
+  expect(terminal).toEqual(segments.map(segment => ({ ...segment, streamable: false })));
+
+  const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0);
+  const ambiguous = chatGptMarkdownProjectionForObservation(segments, {
+    answerProjectionAnchored: false,
+    sawStructuredActivity: true,
+    completionReady: false,
+  });
+  if (ambiguous) buffer.observe(ambiguous, 0);
+  const actualFinal = chatGptMarkdownProjectionForObservation([{
+    key: "0:p",
+    tag: "p",
+    html: "<p>Actual final answer</p>",
+    text: "Actual final answer",
+    streamable: false,
+  }], {
+    answerProjectionAnchored: true,
+    sawStructuredActivity: true,
+    completionReady: true,
+  });
+  expect(actualFinal).toBeDefined();
+  expect(buffer.observe(actualFinal!, 1)).toBe("");
+  expect(buffer.finish()).toEqual({
+    markdown: "Actual final answer",
+    delta: "Actual final answer",
+  });
 });
 
 test("submission observation is mutation-driven and diagnostics avoid full-page layout reads", () => {

@@ -175,26 +175,42 @@ export async function selectLauncherPage(
   abortSignal?: AbortSignal,
 ): Promise<{ context: BrowserContext; page: Page }> {
   const deadline = Date.now() + timeoutMs;
+  const inFlight = new Set<Page>();
+  const owned = new Map<Page, { context: BrowserContext; page: Page }>();
   do {
     if (abortSignal?.aborted) {
       throw new DOMException("Launcher browser connection aborted", "AbortError");
     }
+    if (owned.size > 0) {
+      // Let other responsive probes from the same target snapshot settle so duplicated ownership
+      // is still detected. Crucially, never wait for an unrelated unresponsive renderer.
+      await new Promise(resolve => setTimeout(resolve, 10));
+      if (owned.size > 1) {
+        throw new Error(`Launcher browser host exposed ${owned.size} surfaces with the same ownership id`);
+      }
+      const match = owned.values().next().value;
+      if (match) return match;
+    }
     const candidates = browser.contexts().flatMap(context => context.pages().map(page => ({ context, page })));
-    const inspected = await Promise.all(candidates.map(async candidate => ({
-      ...candidate,
-      surfaceId: await candidate.page.evaluate(
+    let wakeProbe: (() => void) | undefined;
+    const probeSettled = new Promise<void>(resolve => { wakeProbe = resolve; });
+    for (const candidate of candidates) {
+      if (inFlight.has(candidate.page)) continue;
+      inFlight.add(candidate.page);
+      void candidate.page.evaluate(
         () => (globalThis as typeof globalThis & { __CODEX_WEB_GPT_SURFACE_ID__?: unknown })
           .__CODEX_WEB_GPT_SURFACE_ID__,
-      ).catch(() => undefined),
-    })));
-    const owned = inspected.filter(candidate => candidate.surfaceId === surfaceId);
-    if (owned.length === 1) {
-      return { context: owned[0].context, page: owned[0].page };
+      ).then(candidateSurfaceId => {
+        if (candidateSurfaceId === surfaceId) owned.set(candidate.page, candidate);
+      }).catch(() => undefined).finally(() => {
+        inFlight.delete(candidate.page);
+        wakeProbe?.();
+      });
     }
-    if (owned.length > 1) {
-      throw new Error(`Launcher browser host exposed ${owned.length} surfaces with the same ownership id`);
-    }
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await Promise.race([
+      probeSettled,
+      new Promise(resolve => setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now())))),
+    ]);
   } while (Date.now() < deadline);
   throw new Error("Launcher browser host did not expose its owned browser surface");
 }

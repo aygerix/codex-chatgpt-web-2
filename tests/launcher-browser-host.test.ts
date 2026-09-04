@@ -333,6 +333,27 @@ test("launcher page selection uses the owned surface marker instead of URL order
   });
 });
 
+test("launcher page selection is not blocked by an unrelated unresponsive renderer", async () => {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
+  const stalledPage = {
+    evaluate: async () => await new Promise<never>(() => {}),
+  } as unknown as Page;
+  const ownedPage = {
+    evaluate: async () => descriptor.surfaceId,
+  } as unknown as Page;
+  const context = {
+    pages: () => [stalledPage, ownedPage],
+  } as unknown as BrowserContext;
+  const browser = {
+    contexts: () => [context],
+  } as unknown as Browser;
+
+  await expect(selectLauncherPage(browser, descriptor, 100)).resolves.toEqual({
+    context,
+    page: ownedPage,
+  });
+});
+
 test("launcher page selection rejects duplicated ownership markers", async () => {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
   const page = () => ({

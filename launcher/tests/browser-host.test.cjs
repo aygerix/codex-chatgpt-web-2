@@ -32,6 +32,27 @@ test("Electron and Bun agree on the exact launcher idle surface", () => {
   ));
 });
 
+test("new turn tabs navigate directly to ChatGPT and expose ownership at DOM readiness", () => {
+  const hostSource = fs.readFileSync(
+    resolve(__dirname, "../electron/browser-host.cjs"),
+    "utf8",
+  );
+  const createTurnTab = hostSource.slice(
+    hostSource.indexOf("  createTurnTab("),
+    hostSource.indexOf("  evictOldestRetainedTurnTab("),
+  );
+  const bindTurnContents = hostSource.slice(
+    hostSource.indexOf("  bindTurnContents("),
+    hostSource.indexOf("  bindChatGptBackendRecovery("),
+  );
+
+  assert.ok(createTurnTab.includes("view.webContents.loadURL(CHATGPT_TEMPORARY_CHAT_URL)"));
+  assert.ok(!createTurnTab.includes("view.webContents.loadURL(IDLE_BROWSER_URL)"));
+  assert.ok(bindTurnContents.includes('contents.on("dom-ready"'));
+  assert.ok(bindTurnContents.includes("markOwnedTurnSurface(false)"));
+  assert.ok(bindTurnContents.includes("markOwnedTurnSurface(true)"));
+});
+
 test("primary browser bootstrap accepts only the exact committed idle document", async () => {
   const calls = [];
   const contents = new EventEmitter();

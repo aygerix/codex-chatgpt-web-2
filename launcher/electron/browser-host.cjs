@@ -462,7 +462,10 @@ class BrowserHost {
       ordinal,
       label: `ChatGPT ${ordinal}`,
       pageTitle: "ChatGPT",
-      url: IDLE_BROWSER_URL,
+      // Start the real turn document immediately. The previous idle data: navigation forced every
+      // new renderer to commit a disposable page before the worker could navigate to ChatGPT,
+      // exposing a white "Loading" tab and doubling cold-start work under parallel launches.
+      url: CHATGPT_TEMPORARY_CHAT_URL,
       loading: true,
       message: "ChatGPT is working",
       bootstrapReady: false,
@@ -479,7 +482,7 @@ class BrowserHost {
     view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
-    void view.webContents.loadURL(IDLE_BROWSER_URL).catch((error) => {
+    void view.webContents.loadURL(CHATGPT_TEMPORARY_CHAT_URL).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error("browser.tab_initialization_failed", {
         tabId: tab.id,
@@ -573,6 +576,42 @@ class BrowserHost {
       tab.url = contents.getURL();
       this.publishState?.(this.snapshot());
     });
+    const markOwnedTurnSurface = async (terminal) => {
+      const encoded = JSON.stringify(tab.surfaceId);
+      try {
+        await contents.executeJavaScript(`(() => {
+          Object.defineProperty(globalThis, "__CODEX_WEB_GPT_SURFACE_ID__", {
+            value: ${encoded}, configurable: true, enumerable: false, writable: false,
+          });
+          document.documentElement.dataset.codexWebGptSurface = ${encoded};
+        })()`, true);
+        this.publishState?.(this.snapshot());
+      } catch (error) {
+        // A navigation can replace the execution context between dom-ready and injection. The
+        // next dom-ready retries; only a failure on the fully loaded document is terminal.
+        if (!terminal) {
+          this.logger.warn("browser.turn_ownership_deferred", {
+            tabId: tab.id,
+            traceId: tab.traceId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return;
+        }
+        tab.status = "error";
+        tab.message = `Browser ownership failed: ${error instanceof Error ? error.message : String(error)}`;
+        this.syncPowerSaveBlocker();
+        this.publishState?.(this.snapshot());
+      }
+    };
+    contents.on("dom-ready", () => {
+      // The main-world marker and nonzero emulated viewport are sufficient for Playwright to take
+      // ownership. Do not wait for every ChatGPT subresource and animation to finish first.
+      tab.url = contents.getURL();
+      tab.rendererReady = true;
+      this.syncViewVisibility();
+      void contents.insertCSS(CHATGPT_VIEWPORT_CSS).catch(() => {});
+      void markOwnedTurnSurface(false);
+    });
     contents.on("did-finish-load", () => {
       tab.url = contents.getURL();
       tab.loading = false;
@@ -580,21 +619,7 @@ class BrowserHost {
       if (tab.url.startsWith(CHATGPT_ORIGIN)) tab.bootstrapReady = true;
       this.syncViewVisibility();
       void contents.insertCSS(CHATGPT_VIEWPORT_CSS).catch(() => {});
-      const encoded = JSON.stringify(tab.surfaceId);
-      void contents.executeJavaScript(`(() => {
-        Object.defineProperty(globalThis, "__CODEX_WEB_GPT_SURFACE_ID__", {
-          value: ${encoded}, configurable: true, enumerable: false, writable: false,
-        });
-        document.documentElement.dataset.codexWebGptSurface = ${encoded};
-      })()`, true).then(
-        () => this.publishState?.(this.snapshot()),
-        (error) => {
-          tab.status = "error";
-          tab.message = `Browser ownership failed: ${error instanceof Error ? error.message : String(error)}`;
-          this.syncPowerSaveBlocker();
-          this.publishState?.(this.snapshot());
-        },
-      );
+      void markOwnedTurnSurface(true);
     });
     contents.on("page-title-updated", (_event, title) => {
       if (typeof title === "string" && title.trim()) tab.pageTitle = title.trim();
