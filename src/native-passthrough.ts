@@ -127,11 +127,6 @@ export interface NativeCodexPassthroughOptions {
   defaultSubagentModel?: string;
 }
 
-interface NativeWebCollaborationContext {
-  defaultSubagentModel?: string;
-  webTargets: Set<string>;
-}
-
 const NATIVE_WEB_PLAINTEXT_COLLABORATION_CALLS = new Set([
   "spawn_agent",
   "send_message",
@@ -149,12 +144,6 @@ const NATIVE_WEB_COLLABORATION_ALIASES = new Map<string, {
   ["followup_web_task", { canonical: "followup_task", plaintext: true }],
   ["followup_native_task", { canonical: "followup_task", plaintext: false }],
 ]);
-
-const NATIVE_WEB_ALIAS_FOR = {
-  spawn_agent: "spawn_web_agent",
-  send_message: "send_web_message",
-  followup_task: "followup_web_task",
-} as const;
 
 const NATIVE_ENCRYPTED_ALIAS_FOR = {
   spawn_agent: "spawn_native_agent",
@@ -271,10 +260,8 @@ export function rewriteNativeCollaborationToolsForWeb(
   options: NativeCodexPassthroughOptions = {},
 ): { value: unknown; changed: boolean } {
   if (!isObject(value) || !Array.isArray(value.tools)) return { value, changed: false };
-  const defaultIsWeb = chatGptWebModel(options.defaultSubagentModel);
-  const webTargets = collectNativeTargetsByKind(value, options.defaultSubagentModel, true);
   const nativeTargets = collectNativeTargetsByKind(value, options.defaultSubagentModel, false);
-  const webTargetList = [...webTargets].sort();
+  const nativeTargetList = [...nativeTargets].sort();
   let changed = false;
   const tools = value.tools.map(rawNamespace => {
     if (!isObject(rawNamespace)
@@ -294,94 +281,49 @@ export function rewriteNativeCollaborationToolsForWeb(
       }
       const name = rawTool.name;
       if (name === "spawn_agent") {
-        if (defaultIsWeb) {
-          const canonicalWebSpawn = collaborationMessageToolClone(
+        const portableSpawn = collaborationMessageToolClone(
+          rawTool,
+          "spawn_agent",
+          "Portable collaboration spawn. Use this canonical tool for any child backend, including chatgpt-web/. The task message is intentionally plaintext so cross-backend children can read it. Use spawn_native_agent only when native-only encrypted delivery is explicitly required.",
+          true,
+        );
+        nextTools.push(portableSpawn);
+        if (!existingNames.has(NATIVE_ENCRYPTED_ALIAS_FOR.spawn_agent)) {
+          const nativeSpawn = collaborationMessageToolClone(
             rawTool,
-            "spawn_agent",
-            `Cross-backend Web spawn. The configured default child model is ${JSON.stringify(options.defaultSubagentModel)}. Use this canonical tool for the inherited/default Web child. Use spawn_native_agent for an explicitly native child.`,
-            true,
-          );
-          const canonicalWebParameters = isObject(canonicalWebSpawn.parameters)
-            ? canonicalWebSpawn.parameters
-            : undefined;
-          const canonicalWebProperties = canonicalWebParameters && isObject(canonicalWebParameters.properties)
-            ? canonicalWebParameters.properties
-            : undefined;
-          // One model-facing function cannot make `message` plaintext only for Web model values.
-          // Remove the override entirely on the canonical Web-default surface so the encrypted
-          // native route cannot be selected accidentally with plaintext arguments.
-          if (canonicalWebProperties) delete canonicalWebProperties.model;
-          nextTools.push(canonicalWebSpawn);
-          if (!existingNames.has(NATIVE_ENCRYPTED_ALIAS_FOR.spawn_agent)) {
-            const nativeSpawn = collaborationMessageToolClone(
-              rawTool,
-              NATIVE_ENCRYPTED_ALIAS_FOR.spawn_agent,
-              "Native-only encrypted spawn. An explicit non-chatgpt-web model is required; omitting model would otherwise inherit the configured Web default.",
-              false,
-            );
-            requireCollaborationToolParameter(nativeSpawn, "model");
-            nextTools.push(nativeSpawn);
-          }
-        } else {
-          nextTools.push(collaborationMessageToolClone(
-            rawTool,
-            "spawn_agent",
-            "Native/inherited encrypted spawn. For any model beginning chatgpt-web/, use spawn_web_agent instead so the child receives a readable plaintext task.",
+            NATIVE_ENCRYPTED_ALIAS_FOR.spawn_agent,
+            "Native-only encrypted spawn. An explicit non-chatgpt-web model is required. Never use this surface for a chatgpt-web/... child.",
             false,
-          ));
-          if (!existingNames.has(NATIVE_WEB_ALIAS_FOR.spawn_agent)) {
-            const webSpawn = collaborationMessageToolClone(
-              rawTool,
-              NATIVE_WEB_ALIAS_FOR.spawn_agent,
-              "Web-only cross-backend spawn. REQUIRED for any child model beginning chatgpt-web/. An explicit chatgpt-web/... model is required because the configured default is native. The task message is intentionally plaintext because the Web backend cannot decrypt native collaboration ciphertext.",
-              true,
-            );
-            requireCollaborationToolParameter(webSpawn, "model");
-            nextTools.push(webSpawn);
-          }
+          );
+          requireCollaborationToolParameter(nativeSpawn, "model");
+          const parameters = isObject(nativeSpawn.parameters) ? nativeSpawn.parameters : undefined;
+          const properties = parameters && isObject(parameters.properties) ? parameters.properties : undefined;
+          const model = properties && isObject(properties.model) ? properties.model : undefined;
+          if (model) model.pattern = "^(?!chatgpt-web/).+$";
+          nextTools.push(nativeSpawn);
         }
         changed = true;
         namespaceChanged = true;
         continue;
       }
-      if ((name === "send_message" || name === "followup_task") && webTargets.size > 0) {
+      if (name === "send_message" || name === "followup_task") {
         const canonical = name as "send_message" | "followup_task";
-        const webOnly = nativeTargets.size === 0;
-        if (webOnly) {
-          const action = canonical === "send_message" ? "message" : "follow-up task";
+        const action = canonical === "send_message" ? "message" : "follow-up task";
+        nextTools.push(collaborationMessageToolClone(
+          rawTool,
+          canonical,
+          `Portable plaintext collaboration ${action}. Use this canonical tool for any child backend, including Web.`,
+          true,
+        ));
+        const nativeAlias = NATIVE_ENCRYPTED_ALIAS_FOR[canonical];
+        if (nativeTargetList.length > 0 && !existingNames.has(nativeAlias)) {
           nextTools.push(collaborationMessageToolClone(
             rawTool,
-            canonical,
-            `Cross-backend Web ${action}. All known child targets are Web-backed (${webTargetList.join(", ")}). Use the canonical tool for them; use ${NATIVE_ENCRYPTED_ALIAS_FOR[canonical]} only for an explicitly native target.`,
-            true,
-            webTargetList,
-          ));
-          const nativeAlias = NATIVE_ENCRYPTED_ALIAS_FOR[canonical];
-          if (!existingNames.has(nativeAlias)) {
-            nextTools.push(collaborationMessageToolClone(
-              rawTool,
-              nativeAlias,
-              "Native-only encrypted collaboration message.",
-              false,
-            ));
-          }
-        } else {
-          nextTools.push(collaborationMessageToolClone(
-            rawTool,
-            canonical,
-            `Native-target encrypted collaboration. For Web targets (${webTargetList.join(", ")}), use ${NATIVE_WEB_ALIAS_FOR[canonical]} instead.`,
+            nativeAlias,
+            `Native-only encrypted ${action}. This surface is restricted to currently known native child targets.`,
             false,
+            nativeTargetList,
           ));
-          const webAlias = NATIVE_WEB_ALIAS_FOR[canonical];
-          if (!existingNames.has(webAlias)) {
-            nextTools.push(collaborationMessageToolClone(
-              rawTool,
-              webAlias,
-              `Web-only plaintext collaboration for these known targets: ${webTargetList.join(", ")}.`,
-              true,
-              webTargetList,
-            ));
-          }
         }
         changed = true;
         namespaceChanged = true;
@@ -417,46 +359,34 @@ function functionOutputObject(value: unknown): JsonObject | undefined {
   return undefined;
 }
 
-function collectNativeWebTargets(requestBody: unknown, defaultSubagentModel?: string): Set<string> {
-  return collectNativeTargetsByKind(requestBody, defaultSubagentModel, true);
-}
-
-function shouldDeliverNativeCollaborationPlaintext(
-  call: JsonObject,
-  context: NativeWebCollaborationContext,
-): boolean {
+function shouldDeliverNativeCollaborationPlaintext(call: JsonObject): boolean {
   if (call.type !== "function_call"
     || call.namespace !== "collaboration"
     || typeof call.name !== "string"
     || !NATIVE_WEB_PLAINTEXT_COLLABORATION_CALLS.has(call.name)) return false;
-  const args = jsonArguments(call.arguments);
-  if (!args) return false;
-  if (call.name === "spawn_agent") {
-    if (nativeCollaborationMessageLooksOpaqueCiphertext(call)) return false;
-    return chatGptWebModel(context.defaultSubagentModel)
-      || chatGptWebModel(args.model ?? context.defaultSubagentModel);
-  }
-  if (nativeCollaborationMessageLooksOpaqueCiphertext(call)) return false;
-  const target = args.target;
-  return typeof target === "string" && context.webTargets.has(target);
+  if (!jsonArguments(call.arguments)) return false;
+  // The canonical collaboration surface is deliberately portable. The Responses backend should
+  // leave its message argument readable because the request-side schema removes the `encrypted`
+  // keyword. If it ever returns opaque ciphertext anyway, fail closed rather than falsely stamping
+  // ciphertext as DirectPlaintextMessage.
+  return !nativeCollaborationMessageLooksOpaqueCiphertext(call);
 }
 
 /**
- * Mark only Web-targeted V2 collaboration calls for Codex's existing DirectPlaintextMessage path.
- * The native tool router treats an empty encrypted_function_args array as an explicit plaintext
- * delivery marker for collaboration.spawn_agent/send_message/followup_task. We never decrypt,
- * inspect, or alter the ciphertext itself; native->native calls remain exactly as the backend sent
- * them.
+ * Normalize proxy collaboration aliases and mark every readable canonical V2 collaboration
+ * message for Codex's existing DirectPlaintextMessage path. This is intentionally backend-neutral:
+ * both native and Web children can consume plaintext InterAgentCommunication, while encrypted
+ * native-only aliases remain available as an explicit opt-in.
  */
 export function rewriteNativeCollaborationForWeb(
   value: unknown,
   requestBody: unknown,
   options: NativeCodexPassthroughOptions = {},
 ): { value: unknown; changed: boolean; calls: string[] } {
-  const context: NativeWebCollaborationContext = {
-    ...(options.defaultSubagentModel ? { defaultSubagentModel: options.defaultSubagentModel } : {}),
-    webTargets: collectNativeWebTargets(requestBody, options.defaultSubagentModel),
-  };
+  // Retain the public signature for compatibility with callers and tests; request-side routing now
+  // guarantees that the canonical collaboration message is portable before inference.
+  void requestBody;
+  void options;
   const calls: string[] = [];
   const visit = (candidate: unknown): unknown => {
     if (Array.isArray(candidate)) return candidate.map(visit);
@@ -478,7 +408,7 @@ export function rewriteNativeCollaborationForWeb(
           + " (leaving encrypted delivery intact)",
         );
       }
-    } else if (shouldDeliverNativeCollaborationPlaintext(candidate, context)) {
+    } else if (shouldDeliverNativeCollaborationPlaintext(candidate)) {
       out = { ...candidate, encrypted_function_args: [] };
       calls.push(String(candidate.name));
     }
