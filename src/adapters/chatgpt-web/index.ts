@@ -1072,9 +1072,10 @@ export function createChatGptWebAdapter(
           } else {
             chatGptTurnSessions.retire(executionKey, session);
           }
-          if (session.runtime.mode === "tools") {
-            void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
-          }
+          // Do not revoke the turn capability here. A Responses/SSE observer can fail or reconnect
+          // while the already-accepted browser turn is still alive and may still invoke Codex Native.
+          // ChatGptTurnSession owns capability retirement and performs it only after physical browser
+          // settlement plus all already-admitted observers have drained.
           if (handledError instanceof ChatGptWebAdapterError) {
             emitRoundEvent({
               type: "error",
