@@ -18,7 +18,9 @@ jobs:
         with:
           bun-version-file: package.json
       - name: Patch submission acceptance race
-        run: python3 .github/scripts/patch-submission-acceptance-race.py
+        run: |
+          python3 .github/scripts/fix-submission-race-patch-harness.py
+          python3 .github/scripts/patch-submission-acceptance-race.py
       - name: Install dependencies
         run: |
           bun install --frozen-lockfile
@@ -34,7 +36,7 @@ jobs:
       - name: Commit validated submission acceptance recovery
         run: |
           git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config user.email '41898282+aygerix[bot]@users.noreply.github.com'
           git add src/adapters/chatgpt-web/browser-worker.ts tests/browser-worker-contract.test.ts
           git commit -m 'Recover submission acceptance from stalled DOM probes'
           git push origin HEAD:experiment/native-goal-turn-scoped-capabilities
