@@ -7,11 +7,6 @@ new = '''    const state = await this.submissionDomState(page, baseline.domCache
 if old not in s:
     raise SystemExit('steer reconciliation anchor not found')
 s = s.replace(old, new, 1)
-old = '''        const stableIdentity = provisional.identity ?? undefined;\n        const identity = stableIdentity ?? `codex-steer-${revision}`;\n'''
-new = '''        const stableIdentity = provisional.identity ?? undefined;\n        const identity = stableIdentity ?? `codex-steer-${revision}`;\n        if (!stableIdentity) {\n          console.info(\n            `[chatgpt-web] browser turn ${turn.traceId} bound steer revision ${revision}`\n            + " to a provisional semantic assistant node before ChatGPT assigned a stable turn identity",\n          );\n        }\n'''
-if old not in s:
-    raise SystemExit('provisional steer logging anchor not found')
-s = s.replace(old, new, 1)
 p.write_text(s)
 
 p = Path('src/native-passthrough.ts')
@@ -31,7 +26,7 @@ test("provisional steer reconciliation trusts the accepted steer epoch while sta
   const source = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
   expect(source).toContain('const provisionalSteerBinding = binding.identity.startsWith("codex-steer-")');
   expect(source).toContain('if (!provisionalSteerBinding)');
-  expect(source).toContain('bound steer revision ${revision}');
+  expect(source).toContain('const identity = provisionalSteerBinding');
 });
 '''
 if 'provisional steer reconciliation trusts the accepted steer epoch' not in s:
