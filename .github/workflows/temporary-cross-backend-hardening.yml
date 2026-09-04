@@ -1,0 +1,42 @@
+name: Temporary cross backend hardening
+
+on:
+  push:
+    branches:
+      - experiment/native-goal-turn-scoped-capabilities
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - name: Patch cross-backend hardening
+        run: python3 .github/scripts/patch-cross-backend-hardening.py
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile
+          (cd launcher && bun install --frozen-lockfile)
+      - name: Validate exact experiment
+        run: |
+          bun run check-version
+          bun run typecheck
+          bun run test
+          bun run launcher:typecheck
+          bun run launcher:test
+          bun run launcher:build
+          bun run build
+          bun run smoke
+      - name: Commit validated hardening
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/adapters/chatgpt-web/browser-worker.ts src/native-passthrough.ts tests/chatgpt-steering-lifecycle.test.ts tests/native-passthrough.test.ts
+          git commit -m 'Harden steer and Web child epochs'
+          git push origin HEAD:experiment/native-goal-turn-scoped-capabilities
