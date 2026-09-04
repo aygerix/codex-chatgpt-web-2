@@ -17,10 +17,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
-      - name: Patch native Web plaintext collaboration surface
-        run: |
-          python3 .github/scripts/patch-native-web-plaintext-surface.py
-          python3 .github/scripts/refine-native-web-plaintext-surface.py
+      - name: Harden native Web plaintext collaboration surface
+        run: python3 .github/scripts/harden-native-web-plaintext-surface.py
       - name: Install dependencies
         run: |
           bun install --frozen-lockfile
@@ -36,10 +34,10 @@ jobs:
           bun run launcher:build
           bun run build
           bun run smoke
-      - name: Commit validated native Web plaintext surface
+      - name: Commit validated native Web plaintext hardening
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+aygerix[bot]@users.noreply.github.com'
           git add src/native-passthrough.ts tests/native-passthrough.test.ts
-          git commit -m 'Add plaintext native-to-Web collaboration surface'
+          git commit -m 'Harden plaintext native-to-Web collaboration routing'
           git push origin HEAD:experiment/native-goal-turn-scoped-capabilities
