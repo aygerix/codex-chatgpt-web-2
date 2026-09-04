@@ -364,6 +364,7 @@ test("native request gives a Web-default parent a plaintext canonical spawn and 
   expect(byName.get("spawn_agent")!.description).toContain("configured default child model");
   expect(byName.get("spawn_native_agent")!.parameters.properties.message.encrypted).toBe(true);
   expect(byName.get("spawn_native_agent")!.parameters.properties).toHaveProperty("model");
+  expect(byName.get("spawn_native_agent")!.parameters.required).toContain("model");
   expect(byName.get("send_message")!.parameters.properties.message.encrypted).toBe(true);
   expect(byName.has("send_web_message")).toBe(false);
 });
@@ -393,7 +394,50 @@ test("native request with a native default exposes a dedicated plaintext Web spa
   const webAlias = candidates.find((candidate: any) => candidate.name === "spawn_web_agent");
   expect(canonical.parameters.properties.message.encrypted).toBe(true);
   expect(webAlias.parameters.properties.message).not.toHaveProperty("encrypted");
+  expect(webAlias.parameters.required).toContain("model");
   expect(webAlias.description).toContain("REQUIRED");
+});
+
+test("opaque native ciphertext targeting Web is never relabeled as plaintext", async () => {
+  const body = { model: "gpt-5.6-sol", input: [] };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const ciphertext = "gAAAAABqmtePV4JnmXa8rCIZ3slT8AIYBvnzsk0NCjpmFBD2Rfy35tmzkBBv0rel5l1WpAXJLbnCpZBIL7BWFm16pcNLX4MPdgcQ0NKN_AE5HMRPr5PjCmMJZPFj1NyhEQ";
+  const response = await forwardNativeCodexRequest(request, "responses", async () => nativeCollaborationStream({
+    type: "function_call",
+    call_id: "opaque_web_spawn",
+    namespace: "collaboration",
+    name: "spawn_agent",
+    arguments: JSON.stringify({ task_name: "web_worker", model: "chatgpt-web/extra-high", message: ciphertext }),
+  }), body, { defaultSubagentModel: "chatgpt-web/extra-high" });
+  const text = await response.text();
+  expect(text).toContain(ciphertext);
+  expect(text).not.toContain('"encrypted_function_args":[]');
+});
+
+test("opaque ciphertext returned through the Web alias maps canonical but fails closed", async () => {
+  const body = { model: "gpt-5.6-sol", input: [] };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const ciphertext = "gAAAAABqmsVwfj2W8Z1WLng7ZG13GNpEBFy_-H1oqQont8EWO4GqldqXMGz_n-fT5GWtZSkuenCqvwmzQQCiDz66SvMwMksWJDoD3KtZ5laHtgFAOMfYvM6hGyL9O_EOM";
+  const response = await forwardNativeCodexRequest(request, "responses", async () => nativeCollaborationStream({
+    type: "function_call",
+    call_id: "opaque_web_alias",
+    namespace: "collaboration",
+    name: "spawn_web_agent",
+    arguments: JSON.stringify({ task_name: "web_worker", model: "chatgpt-web/extra-high", message: ciphertext }),
+  }), body, { defaultSubagentModel: "gpt-5.6-sol" });
+  const text = await response.text();
+  expect(text).toContain('"name":"spawn_agent"');
+  expect(text).not.toContain("spawn_web_agent");
+  expect(text).toContain(ciphertext);
+  expect(text).not.toContain('"encrypted_function_args":[]');
 });
 
 test("proxy Web spawn alias is normalized to canonical plaintext Codex spawn", async () => {

@@ -202,6 +202,23 @@ function collaborationMessageToolClone(
   return clone;
 }
 
+function requireCollaborationToolParameter(tool: JsonObject, parameter: string): void {
+  const parameters = isObject(tool.parameters) ? tool.parameters : undefined;
+  if (!parameters) return;
+  const required = Array.isArray(parameters.required)
+    ? parameters.required.filter((value): value is string => typeof value === "string")
+    : [];
+  if (!required.includes(parameter)) parameters.required = [...required, parameter];
+}
+
+function nativeCollaborationMessageLooksOpaqueCiphertext(call: JsonObject): boolean {
+  const args = jsonArguments(call.arguments);
+  const message = args?.message;
+  // Current native collaboration ciphertext is Fernet-shaped (`gAAAA...`). Do not guess at
+  // decryption or relabel it as plaintext if the upstream backend ignored our proxy schema.
+  return typeof message === "string" && /^gAAAA[A-Za-z0-9_-]{32,}={0,2}$/.test(message);
+}
+
 function collectNativeTargetsByKind(
   requestBody: unknown,
   defaultSubagentModel: string | undefined,
@@ -264,6 +281,7 @@ export function rewriteNativeCollaborationToolsForWeb(
       || rawNamespace.type !== "namespace"
       || rawNamespace.name !== "collaboration"
       || !Array.isArray(rawNamespace.tools)) return rawNamespace;
+    let namespaceChanged = false;
     const existingNames = new Set(rawNamespace.tools
       .filter(isObject)
       .map(tool => tool.name)
@@ -295,12 +313,14 @@ export function rewriteNativeCollaborationToolsForWeb(
           if (canonicalWebProperties) delete canonicalWebProperties.model;
           nextTools.push(canonicalWebSpawn);
           if (!existingNames.has(NATIVE_ENCRYPTED_ALIAS_FOR.spawn_agent)) {
-            nextTools.push(collaborationMessageToolClone(
+            const nativeSpawn = collaborationMessageToolClone(
               rawTool,
               NATIVE_ENCRYPTED_ALIAS_FOR.spawn_agent,
-              "Native-only encrypted spawn. Use this instead of spawn_agent when intentionally selecting a non-chatgpt-web model.",
+              "Native-only encrypted spawn. An explicit non-chatgpt-web model is required; omitting model would otherwise inherit the configured Web default.",
               false,
-            ));
+            );
+            requireCollaborationToolParameter(nativeSpawn, "model");
+            nextTools.push(nativeSpawn);
           }
         } else {
           nextTools.push(collaborationMessageToolClone(
@@ -310,15 +330,18 @@ export function rewriteNativeCollaborationToolsForWeb(
             false,
           ));
           if (!existingNames.has(NATIVE_WEB_ALIAS_FOR.spawn_agent)) {
-            nextTools.push(collaborationMessageToolClone(
+            const webSpawn = collaborationMessageToolClone(
               rawTool,
               NATIVE_WEB_ALIAS_FOR.spawn_agent,
-              "Web-only cross-backend spawn. REQUIRED for any child model beginning chatgpt-web/. The task message is intentionally plaintext because the Web backend cannot decrypt native collaboration ciphertext.",
+              "Web-only cross-backend spawn. REQUIRED for any child model beginning chatgpt-web/. An explicit chatgpt-web/... model is required because the configured default is native. The task message is intentionally plaintext because the Web backend cannot decrypt native collaboration ciphertext.",
               true,
-            ));
+            );
+            requireCollaborationToolParameter(webSpawn, "model");
+            nextTools.push(webSpawn);
           }
         }
         changed = true;
+        namespaceChanged = true;
         continue;
       }
       if ((name === "send_message" || name === "followup_task") && webTargets.size > 0) {
@@ -361,11 +384,12 @@ export function rewriteNativeCollaborationToolsForWeb(
           }
         }
         changed = true;
+        namespaceChanged = true;
         continue;
       }
       nextTools.push(rawTool);
     }
-    if (!changed) return rawNamespace;
+    if (!namespaceChanged) return rawNamespace;
     return { ...rawNamespace, tools: nextTools };
   });
   return changed ? { value: { ...value, tools }, changed: true } : { value, changed: false };
@@ -408,9 +432,11 @@ function shouldDeliverNativeCollaborationPlaintext(
   const args = jsonArguments(call.arguments);
   if (!args) return false;
   if (call.name === "spawn_agent") {
+    if (nativeCollaborationMessageLooksOpaqueCiphertext(call)) return false;
     return chatGptWebModel(context.defaultSubagentModel)
       || chatGptWebModel(args.model ?? context.defaultSubagentModel);
   }
+  if (nativeCollaborationMessageLooksOpaqueCiphertext(call)) return false;
   const target = args.target;
   return typeof target === "string" && context.webTargets.has(target);
 }
@@ -443,9 +469,14 @@ export function rewriteNativeCollaborationForWeb(
       : undefined;
     if (alias) {
       out = { ...candidate, name: alias.canonical };
-      if (alias.plaintext) {
+      if (alias.plaintext && !nativeCollaborationMessageLooksOpaqueCiphertext(candidate)) {
         out.encrypted_function_args = [];
         calls.push(alias.canonical);
+      } else if (alias.plaintext) {
+        console.warn(
+          `[codex-chatgpt-web] native_web_collaboration_ciphertext_unrecoverable call=${alias.canonical}`
+          + " (leaving encrypted delivery intact)",
+        );
       }
     } else if (shouldDeliverNativeCollaborationPlaintext(candidate, context)) {
       out = { ...candidate, encrypted_function_args: [] };
