@@ -133,6 +133,8 @@ const NATIVE_WEB_PLAINTEXT_COLLABORATION_CALLS = new Set([
   "followup_task",
 ]);
 
+const PORTABLE_COLLABORATION_NAMESPACE = "codex_web_collaboration";
+
 const NATIVE_WEB_COLLABORATION_ALIASES = new Map<string, {
   canonical: "spawn_agent" | "send_message" | "followup_task";
   plaintext: boolean;
@@ -144,16 +146,6 @@ const NATIVE_WEB_COLLABORATION_ALIASES = new Map<string, {
   ["followup_web_task", { canonical: "followup_task", plaintext: true }],
   ["followup_native_task", { canonical: "followup_task", plaintext: false }],
 ]);
-
-const NATIVE_ENCRYPTED_ALIAS_FOR = {
-  spawn_agent: "spawn_native_agent",
-  send_message: "send_native_message",
-  followup_task: "followup_native_task",
-} as const;
-
-function chatGptWebModel(value: unknown): value is string {
-  return typeof value === "string" && value.startsWith("chatgpt-web/");
-}
 
 function jsonArguments(value: unknown): JsonObject | undefined {
   if (isObject(value)) return value;
@@ -191,56 +183,12 @@ function collaborationMessageToolClone(
   return clone;
 }
 
-function requireCollaborationToolParameter(tool: JsonObject, parameter: string): void {
-  const parameters = isObject(tool.parameters) ? tool.parameters : undefined;
-  if (!parameters) return;
-  const required = Array.isArray(parameters.required)
-    ? parameters.required.filter((value): value is string => typeof value === "string")
-    : [];
-  if (!required.includes(parameter)) parameters.required = [...required, parameter];
-}
-
 function nativeCollaborationMessageLooksOpaqueCiphertext(call: JsonObject): boolean {
   const args = jsonArguments(call.arguments);
   const message = args?.message;
   // Current native collaboration ciphertext is Fernet-shaped (`gAAAA...`). Do not guess at
   // decryption or relabel it as plaintext if the upstream backend ignored our proxy schema.
   return typeof message === "string" && /^gAAAA[A-Za-z0-9_-]{32,}={0,2}$/.test(message);
-}
-
-function collectNativeTargetsByKind(
-  requestBody: unknown,
-  defaultSubagentModel: string | undefined,
-  wantWeb: boolean,
-): Set<string> {
-  const targets = new Set<string>();
-  if (!isObject(requestBody) || !Array.isArray(requestBody.input)) return targets;
-  const matchingSpawnCalls = new Set<string>();
-  for (const raw of requestBody.input) {
-    if (!isObject(raw)
-      || raw.type !== "function_call"
-      || raw.namespace !== "collaboration"
-      || raw.name !== "spawn_agent"
-      || typeof raw.call_id !== "string") continue;
-    const args = jsonArguments(raw.arguments);
-    const model = args?.model ?? defaultSubagentModel;
-    if (chatGptWebModel(model) !== wantWeb) continue;
-    matchingSpawnCalls.add(raw.call_id);
-    if (typeof args?.task_name === "string" && args.task_name.trim()) targets.add(args.task_name);
-  }
-  for (const raw of requestBody.input) {
-    if (!isObject(raw)
-      || raw.type !== "function_call_output"
-      || typeof raw.call_id !== "string"
-      || !matchingSpawnCalls.has(raw.call_id)) continue;
-    const result = functionOutputObject(raw.output);
-    if (!result) continue;
-    for (const key of ["task_name", "nickname", "agent_id", "thread_id"] as const) {
-      const value = result[key];
-      if (typeof value === "string" && value.trim()) targets.add(value);
-    }
-  }
-  return targets;
 }
 
 /**
@@ -260,80 +208,53 @@ export function rewriteNativeCollaborationToolsForWeb(
   options: NativeCodexPassthroughOptions = {},
 ): { value: unknown; changed: boolean } {
   if (!isObject(value)) return { value, changed: false };
-  const nativeTargets = collectNativeTargetsByKind(value, options.defaultSubagentModel, false);
-  const nativeTargetList = [...nativeTargets].sort();
+  void options;
   const rewriteTools = (rawTools: unknown[]): { tools: unknown[]; changed: boolean } => {
     let changed = false;
-    const tools = rawTools.map(rawNamespace => {
+    const portableNamespaceExists = rawTools.some(rawTool => (
+      isObject(rawTool)
+      && rawTool.type === "namespace"
+      && rawTool.name === PORTABLE_COLLABORATION_NAMESPACE
+    ));
+    const tools = rawTools.flatMap(rawNamespace => {
       if (!isObject(rawNamespace)
         || rawNamespace.type !== "namespace"
         || rawNamespace.name !== "collaboration"
-        || !Array.isArray(rawNamespace.tools)) return rawNamespace;
-      let namespaceChanged = false;
-      const existingNames = new Set(rawNamespace.tools
-        .filter(isObject)
-        .map(tool => tool.name)
-        .filter((name): name is string => typeof name === "string"));
-      const nextTools: unknown[] = [];
+        || !Array.isArray(rawNamespace.tools)
+        || portableNamespaceExists) return [rawNamespace];
+      const reservedTools: unknown[] = [];
+      const portableTools: JsonObject[] = [];
       for (const rawTool of rawNamespace.tools) {
         if (!isObject(rawTool) || rawTool.type !== "function" || typeof rawTool.name !== "string") {
-          nextTools.push(rawTool);
+          reservedTools.push(rawTool);
           continue;
         }
         const name = rawTool.name;
-        if (name === "spawn_agent") {
-          const portableSpawn = collaborationMessageToolClone(
+        if (NATIVE_WEB_PLAINTEXT_COLLABORATION_CALLS.has(name)) {
+          const action = name === "spawn_agent" ? "spawn"
+            : name === "send_message" ? "message"
+            : "follow-up task";
+          portableTools.push(collaborationMessageToolClone(
             rawTool,
-            "spawn_agent",
-            "Portable collaboration spawn. Use this canonical tool for any child backend, including chatgpt-web/. The task message is intentionally plaintext so cross-backend children can read it. Use spawn_native_agent only when native-only encrypted delivery is explicitly required.",
-            true,
-          );
-          nextTools.push(portableSpawn);
-          if (!existingNames.has(NATIVE_ENCRYPTED_ALIAS_FOR.spawn_agent)) {
-            const nativeSpawn = collaborationMessageToolClone(
-              rawTool,
-              NATIVE_ENCRYPTED_ALIAS_FOR.spawn_agent,
-              "Native-only encrypted spawn. An explicit non-chatgpt-web model is required. Never use this surface for a chatgpt-web/... child.",
-              false,
-            );
-            requireCollaborationToolParameter(nativeSpawn, "model");
-            const parameters = isObject(nativeSpawn.parameters) ? nativeSpawn.parameters : undefined;
-            const properties = parameters && isObject(parameters.properties) ? parameters.properties : undefined;
-            const model = properties && isObject(properties.model) ? properties.model : undefined;
-            if (model) model.pattern = "^(?!chatgpt-web/).+$";
-            nextTools.push(nativeSpawn);
-          }
-          changed = true;
-          namespaceChanged = true;
-          continue;
-        }
-        if (name === "send_message" || name === "followup_task") {
-          const canonical = name as "send_message" | "followup_task";
-          const action = canonical === "send_message" ? "message" : "follow-up task";
-          nextTools.push(collaborationMessageToolClone(
-            rawTool,
-            canonical,
-            `Portable plaintext collaboration ${action}. Use this canonical tool for any child backend, including Web.`,
+            name,
+            `Portable plaintext collaboration ${action}. Use this proxy namespace for children on any backend, including chatgpt-web/.`,
             true,
           ));
-          const nativeAlias = NATIVE_ENCRYPTED_ALIAS_FOR[canonical];
-          if (nativeTargetList.length > 0 && !existingNames.has(nativeAlias)) {
-            nextTools.push(collaborationMessageToolClone(
-              rawTool,
-              nativeAlias,
-              `Native-only encrypted ${action}. This surface is restricted to currently known native child targets.`,
-              false,
-              nativeTargetList,
-            ));
-          }
-          changed = true;
-          namespaceChanged = true;
           continue;
         }
-        nextTools.push(rawTool);
+        reservedTools.push(rawTool);
       }
-      if (!namespaceChanged) return rawNamespace;
-      return { ...rawNamespace, tools: nextTools };
+      if (portableTools.length === 0) return [rawNamespace];
+      changed = true;
+      return [
+        { ...rawNamespace, tools: reservedTools },
+        {
+          type: "namespace",
+          name: PORTABLE_COLLABORATION_NAMESPACE,
+          description: "Portable plaintext collaboration controls. Use this namespace for spawn_agent, send_message, and followup_task so cross-backend children can read their task messages.",
+          tools: portableTools,
+        },
+      ];
     });
     return { tools, changed };
   };
@@ -370,28 +291,6 @@ export function rewriteNativeCollaborationToolsForWeb(
   }, changed: true };
 }
 
-function functionOutputObject(value: unknown): JsonObject | undefined {
-  if (isObject(value)) return value;
-  const texts: string[] = [];
-  if (typeof value === "string") texts.push(value);
-  else if (Array.isArray(value)) {
-    for (const item of value) {
-      if (!isObject(item)) continue;
-      const text = item.text;
-      if (typeof text === "string") texts.push(text);
-    }
-  }
-  for (const text of texts) {
-    try {
-      const parsed: unknown = JSON.parse(text);
-      if (isObject(parsed)) return parsed;
-    } catch {
-      // A human-readable tool output is not agent metadata; keep looking.
-    }
-  }
-  return undefined;
-}
-
 function shouldDeliverNativeCollaborationPlaintext(call: JsonObject): boolean {
   if (call.type !== "function_call"
     || call.namespace !== "collaboration"
@@ -425,12 +324,24 @@ export function rewriteNativeCollaborationForWeb(
     if (Array.isArray(candidate)) return candidate.map(visit);
     if (!isObject(candidate)) return candidate;
     let out: JsonObject = candidate;
-    const alias = candidate.type === "function_call"
+    const portable = candidate.type === "function_call"
+      && candidate.namespace === PORTABLE_COLLABORATION_NAMESPACE
+      && typeof candidate.name === "string"
+      && NATIVE_WEB_PLAINTEXT_COLLABORATION_CALLS.has(candidate.name);
+    const alias = !portable && candidate.type === "function_call"
       && candidate.namespace === "collaboration"
       && typeof candidate.name === "string"
       ? NATIVE_WEB_COLLABORATION_ALIASES.get(candidate.name)
       : undefined;
-    if (alias) {
+    if (portable && !nativeCollaborationMessageLooksOpaqueCiphertext(candidate)) {
+      out = { ...candidate, namespace: "collaboration", encrypted_function_args: [] };
+      calls.push(String(candidate.name));
+    } else if (portable) {
+      console.warn(
+        `[codex-chatgpt-web] native_web_collaboration_ciphertext_unrecoverable call=${String(candidate.name)}`
+        + " (leaving proxy namespace intact)",
+      );
+    } else if (alias) {
       out = { ...candidate, name: alias.canonical };
       if (alias.plaintext && !nativeCollaborationMessageLooksOpaqueCiphertext(candidate)) {
         out.encrypted_function_args = [];
@@ -635,7 +546,7 @@ export async function forwardNativeCodexRequest(
         && Array.isArray(rewritten.input)
         && rewritten.input.some(item => isObject(item) && item.type === "additional_tools");
       console.info(
-        `[codex-chatgpt-web] native_collaboration_schema_plaintext wire=${responsesLite ? "responses_lite" : "responses"}`,
+        `[codex-chatgpt-web] native_portable_collaboration_tools wire=${responsesLite ? "responses_lite" : "responses"}`,
       );
     }
     if (scrubbed.changed || collaborationTools.changed) {
@@ -653,9 +564,12 @@ export async function forwardNativeCodexRequest(
   });
   const upstream = await fetchUpstream(upstreamRequest);
   const responseHeaders = endToEndHeaders(upstream.headers);
-  const isEventStream = (upstream.headers.get("content-type") ?? "")
-    .toLowerCase()
-    .includes("text/event-stream");
+  const upstreamContentType = (upstream.headers.get("content-type") ?? "").toLowerCase();
+  // The authenticated native Codex endpoint can omit Content-Type on a successful Responses SSE
+  // stream. Codex still consumes that body as SSE; recognize the same successful headerless path
+  // so proxy collaboration calls are translated before they reach the local tool router.
+  const isEventStream = upstreamContentType.includes("text/event-stream")
+    || (endpoint === "responses" && upstream.ok && upstreamContentType === "");
   let responseBody = upstream.body
     ? withUncleanCloseTolerance(upstream.body, isEventStream, bytes => {
       console.warn(

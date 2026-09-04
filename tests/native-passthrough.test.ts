@@ -317,7 +317,7 @@ test("does not invent a models client version from an unrelated user agent", asy
 });
 
 
-test("canonical collaboration spawn is portable plaintext under both Web and native defaults", async () => {
+test("reserved collaboration schemas stay unchanged while plaintext calls use a proxy namespace", async () => {
   const tool = (name: string) => ({
     type: "function",
     name,
@@ -342,7 +342,7 @@ test("canonical collaboration spawn is portable plaintext under both Web and nat
         type: "namespace",
         name: "collaboration",
         description: "collab",
-        tools: [tool("spawn_agent"), tool("send_message"), tool("followup_task")],
+        tools: [tool("spawn_agent"), tool("send_message"), tool("followup_task"), tool("list_agents")],
       }],
     };
     const request = new Request("http://127.0.0.1:17841/v1/responses", {
@@ -359,14 +359,12 @@ test("canonical collaboration spawn is portable plaintext under both Web and nat
     }, body, { defaultSubagentModel });
     const forwarded = await upstreamRequest!.json() as { tools: Array<{ name: string; tools: Array<Record<string, any>> }> };
     const collaboration = forwarded.tools.find(namespace => namespace.name === "collaboration")!;
-    const byName = new Map(collaboration.tools.map(candidate => [candidate.name, candidate]));
+    expect(collaboration.tools).toEqual([tool("list_agents")]);
+    const portable = forwarded.tools.find(namespace => namespace.name === "codex_web_collaboration")!;
+    const byName = new Map(portable.tools.map(candidate => [candidate.name, candidate]));
     expect(byName.get("spawn_agent")!.parameters.properties.message).not.toHaveProperty("encrypted");
     expect(byName.get("spawn_agent")!.parameters.properties).toHaveProperty("model");
-    expect(byName.get("spawn_agent")!.description).toContain("any child backend");
-    expect(byName.get("spawn_native_agent")!.parameters.properties.message.encrypted).toBe(true);
-    expect(byName.get("spawn_native_agent")!.parameters.required).toContain("model");
-    expect(byName.get("spawn_native_agent")!.parameters.properties.model.pattern).toBe("^(?!chatgpt-web/).+$");
-    expect(byName.has("spawn_web_agent")).toBe(false);
+    expect(byName.get("spawn_agent")!.description).toContain("proxy namespace");
     expect(byName.get("send_message")!.parameters.properties.message).not.toHaveProperty("encrypted");
     expect(byName.get("followup_task")!.parameters.properties.message).not.toHaveProperty("encrypted");
   }
@@ -397,11 +395,11 @@ test("rewrites Codex 0.153 Responses Lite additional_tools before native inferen
   let forwarded: any;
   const response = await forwardNativeCodexRequest(request, "responses", async input => {
     forwarded = await input.clone().json();
-    const collaboration = forwarded.input[0].tools.find((candidate: any) => candidate.name === "collaboration");
-    const spawn = collaboration.tools.find((candidate: any) => candidate.name === "spawn_agent");
+    const portable = forwarded.input[0].tools.find((candidate: any) => candidate.name === "codex_web_collaboration");
+    const spawn = portable.tools.find((candidate: any) => candidate.name === "spawn_agent");
     const backendEncryptsMessage = spawn.parameters.properties.message.encrypted === true;
     return nativeCollaborationStream({
-      type: "function_call", call_id: "live_responses_lite_spawn", namespace: "collaboration", name: "spawn_agent",
+      type: "function_call", call_id: "live_responses_lite_spawn", namespace: "codex_web_collaboration", name: "spawn_agent",
       arguments: JSON.stringify({
         task_name: "deployment_smoke_test", model: "chatgpt-web/extra-high", reasoning_effort: "xhigh",
         message: backendEncryptsMessage ? ciphertext : "Calculate 17 × 19 and confirm completion.",
@@ -414,14 +412,37 @@ test("rewrites Codex 0.153 Responses Lite additional_tools before native inferen
   expect(forwarded.input[0]).toMatchObject({
     type: "additional_tools", id: "additional_tools_live_shape", role: "developer",
   });
-  const collaboration = forwarded.input[0].tools.find((candidate: any) => candidate.name === "collaboration");
-  const byName = new Map(collaboration.tools.map((candidate: any) => [candidate.name, candidate]));
+  const reserved = forwarded.input[0].tools.find((candidate: any) => candidate.name === "collaboration");
+  expect(reserved.tools).toEqual([]);
+  const portable = forwarded.input[0].tools.find((candidate: any) => candidate.name === "codex_web_collaboration");
+  const byName = new Map(portable.tools.map((candidate: any) => [candidate.name, candidate]));
   expect((byName.get("spawn_agent") as any).parameters.properties.message).not.toHaveProperty("encrypted");
-  expect((byName.get("spawn_native_agent") as any).parameters.properties.message.encrypted).toBe(true);
   const responseText = await response.text();
+  expect(responseText).toContain('"namespace":"collaboration"');
+  expect(responseText).not.toContain("codex_web_collaboration");
   expect(responseText).toContain("Calculate 17 × 19 and confirm completion.");
   expect(responseText).toContain('"encrypted_function_args":[]');
   expect(responseText).not.toContain(ciphertext);
+});
+
+test("translates portable collaboration in a successful headerless native SSE stream", async () => {
+  const body = { model: "gpt-5.6-sol", input: [] };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST", headers: { authorization: "Bearer codex-oauth-token", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const item = {
+    type: "function_call", call_id: "headerless_spawn", namespace: "codex_web_collaboration",
+    name: "spawn_agent", arguments: JSON.stringify({ task_name: "worker", message: "plain task" }),
+  };
+  const event = { type: "response.output_item.done", output_index: 0, item };
+  const response = await forwardNativeCodexRequest(request, "responses", async () => new Response(
+    `event: response.output_item.done\ndata: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`,
+  ), body);
+  const text = await response.text();
+  expect(text).toContain('"namespace":"collaboration"');
+  expect(text).toContain('"encrypted_function_args":[]');
+  expect(text).not.toContain("codex_web_collaboration");
 });
 
 test("explicit Web selection under a native default stays on plaintext canonical spawn_agent", async () => {
@@ -527,7 +548,7 @@ test("proxy native spawn alias maps back without stripping native encryption", a
   expect(text).not.toContain('"encrypted_function_args":[]');
 });
 
-test("Web-only child history makes canonical follow-up messaging plaintext before inference", async () => {
+test("follow-up messaging moves to the portable namespace without mutating its schema", async () => {
   const priorArgs = JSON.stringify({ task_name: "web_task", model: "chatgpt-web/extra-high", message: "initial" });
   const tool = (name: string) => ({ type: "function", name, description: name, strict: false, parameters: {
     type: "object", properties: { target: { type: "string" }, message: { type: "string", encrypted: true } },
@@ -549,15 +570,14 @@ test("Web-only child history makes canonical follow-up messaging plaintext befor
     return nativeCollaborationStream({ type: "function_call", call_id: "noop", namespace: "collaboration", name: "list_agents", arguments: "{}" });
   }, body, { defaultSubagentModel: "chatgpt-web/extra-high" });
   const forwarded = await upstreamRequest!.json() as any;
-  const byName = new Map(forwarded.tools[0].tools.map((candidate: any) => [candidate.name, candidate]));
+  expect(forwarded.tools[0].tools).toEqual([]);
+  const byName = new Map(forwarded.tools[1].tools.map((candidate: any) => [candidate.name, candidate]));
   expect((byName.get("send_message") as any).parameters.properties.message).not.toHaveProperty("encrypted");
   expect((byName.get("followup_task") as any).parameters.properties.message).not.toHaveProperty("encrypted");
   expect((byName.get("send_message") as any).parameters.properties.target).not.toHaveProperty("enum");
-  expect(byName.has("send_native_message")).toBe(false);
-  expect(byName.has("followup_native_task")).toBe(false);
 });
 
-test("mixed native and Web children keep encrypted canonical messaging and add a target-constrained Web alias", async () => {
+test("mixed child history still uses one portable plaintext messaging surface", async () => {
   const body = {
     model: "gpt-5.6-sol",
     input: [
@@ -580,14 +600,12 @@ test("mixed native and Web children keep encrypted canonical messaging and add a
     return nativeCollaborationStream({ type: "function_call", call_id: "noop", namespace: "collaboration", name: "list_agents", arguments: "{}" });
   }, body, { defaultSubagentModel: "chatgpt-web/extra-high" });
   const forwarded = await upstreamRequest!.json() as any;
-  const candidates = forwarded.tools[0].tools;
-  const canonical = candidates.find((candidate: any) => candidate.name === "send_message");
-  const nativeAlias = candidates.find((candidate: any) => candidate.name === "send_native_message");
-  expect(canonical.parameters.properties.message).not.toHaveProperty("encrypted");
-  expect(canonical.parameters.properties.target).not.toHaveProperty("enum");
-  expect(nativeAlias.parameters.properties.message.encrypted).toBe(true);
-  expect(nativeAlias.parameters.properties.target.enum).toEqual(["native_task"]);
-  expect(candidates.some((candidate: any) => candidate.name === "send_web_message")).toBe(false);
+  expect(forwarded.tools[0].tools).toEqual([]);
+  const portable = forwarded.tools[1];
+  expect(portable.name).toBe("codex_web_collaboration");
+  expect(portable.tools[0].name).toBe("send_message");
+  expect(portable.tools[0].parameters.properties.message).not.toHaveProperty("encrypted");
+  expect(portable.tools[0].parameters.properties.target).not.toHaveProperty("enum");
 });
 
 /** A reset after `data: [DONE]` is a completed stream, while a reset before it is a truncation. */
